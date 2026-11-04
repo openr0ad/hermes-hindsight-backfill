@@ -49,27 +49,38 @@ TAG = "backfill"
 SOURCE = "hermes-hindsight-backfill"
 MIN_TEXT_CHARS = 200
 
-DEFAULT_EXCLUDE_PATTERNS = [
-    r"quick question",
-    r"\bweather\b",
-    r"\bbreakfast\b",
-    r"\blunch\b",
-    r"\bdinner\b",
-    r"\bsnacks?\b",
-    r"\bmacros?\b",
-    r"\bcalories\b",
-    r"\bnutrition\b",
-    r"\bgreeting\b",
-    # Meal-log vocabulary. This only sees the session TITLE, so it is a blunt
-    # instrument — a technical session that merely mentions "logs" (e.g.
-    # "Review peanut logs") must NOT match. DEFAULT_EXCLUDE_TOOLS is the precise
-    # signal; these patterns are the fallback for older sessions that logged
-    # meals without going through the healthlog plugin.
-    r"\bmeals?\b",
-    r"\bmeal log(?:ging|ged)?\b",
-    r"\bfood (?:log|intake|tracker|diary)\b",
-    r"\bintake\b",
+@dataclass(frozen=True)
+class TitleRule:
+    """A built-in title rule: stable id (for --disable-rule / the UI), the
+    regex, and a plain-language label shown to people instead of the regex."""
+    id: str
+    pattern: str
+    label: str
+
+
+# Title-based exclusions. These only see the session TITLE, so they are a blunt
+# instrument — a technical session that merely mentions "logs" (e.g. "Review
+# peanut logs") must NOT match. DEFAULT_EXCLUDE_TOOLS is the precise signal; the
+# meal words are the fallback for older sessions that logged meals without
+# going through the healthlog plugin.
+EXCLUDE_RULES = [
+    TitleRule("quick-question", r"quick question", '"quick question"'),
+    TitleRule("weather", r"\bweather\b", '"weather"'),
+    TitleRule("breakfast", r"\bbreakfast\b", '"breakfast"'),
+    TitleRule("lunch", r"\blunch\b", '"lunch"'),
+    TitleRule("dinner", r"\bdinner\b", '"dinner"'),
+    TitleRule("snack", r"\bsnacks?\b", '"snack" or "snacks"'),
+    TitleRule("macros", r"\bmacros?\b", '"macro" or "macros"'),
+    TitleRule("calories", r"\bcalories\b", '"calories"'),
+    TitleRule("nutrition", r"\bnutrition\b", '"nutrition"'),
+    TitleRule("greeting", r"\bgreeting\b", '"greeting"'),
+    TitleRule("meal", r"\bmeals?\b", '"meal" or "meals"'),
+    TitleRule("meal-log", r"\bmeal log(?:ging|ged)?\b", '"meal log", "meal logging" or "meal logged"'),
+    TitleRule("food-log", r"\bfood (?:log|intake|tracker|diary)\b",
+              '"food log", "food intake", "food tracker" or "food diary"'),
+    TitleRule("intake", r"\bintake\b", '"intake"'),
 ]
+DEFAULT_EXCLUDE_PATTERNS = [r.pattern for r in EXCLUDE_RULES]
 
 # Tools whose presence in a session marks it as a write-only log entry rather
 # than technical work worth remembering. Matched against messages.tool_name,
@@ -82,21 +93,29 @@ DEFAULT_EXCLUDE_TOOLS = ["log_meal"]
 # "Improving AI meal logging prompts" are sessions about the meal-logging
 # *system* — real technical work — not meal entries. Checked before the
 # exclusion patterns; --keep-pattern adds to this list.
-DEFAULT_KEEP_PATTERNS = [
-    r"\bfix\b",
-    r"\brebuil",
-    r"\bdebug",
-    r"\bprompt",
-    r"\bprotocol\b",
-    r"\bintegration\b",
-    r"\.csv\b",
-    r"\berror\b",
-    r"\bscript",
-    r"\bbug\b",
-    r"\bskill\b",
-    r"\bschema\b",
-    r"\bcron\b",
+KEEP_RULES = [
+    TitleRule("fix", r"\bfix\b", '"fix"'),
+    TitleRule("rebuild", r"\brebuil", 'words starting with "rebuil" (rebuild, rebuilding, rebuilt)'),
+    TitleRule("debug", r"\bdebug", 'words starting with "debug" (debug, debugging)'),
+    TitleRule("prompt", r"\bprompt", 'words starting with "prompt" (prompt, prompts)'),
+    TitleRule("protocol", r"\bprotocol\b", '"protocol"'),
+    TitleRule("integration", r"\bintegration\b", '"integration"'),
+    TitleRule("csv", r"\.csv\b", 'a .csv file name'),
+    TitleRule("error", r"\berror\b", '"error"'),
+    TitleRule("script", r"\bscript", 'words starting with "script" (script, scripts, scripting)'),
+    TitleRule("bug", r"\bbug\b", '"bug"'),
+    TitleRule("skill", r"\bskill\b", '"skill"'),
+    TitleRule("schema", r"\bschema\b", '"schema"'),
+    TitleRule("cron", r"\bcron\b", '"cron"'),
 ]
+DEFAULT_KEEP_PATTERNS = [r.pattern for r in KEEP_RULES]
+
+
+def word_pattern(text: str) -> str:
+    """Plain words → regex matching them as whole words (case-insensitive at
+    compile time). 'quick question' also matches 'quick   question'."""
+    words = text.strip().split()
+    return r"\b" + r"\s+".join(re.escape(w) for w in words) + r"\b"
 
 
 # ---------------------------------------------------------------------------
@@ -231,21 +250,26 @@ def session_title(session: dict) -> str:
     return session.get("title") or session.get("display_name") or ""
 
 
-def matches_exclusion(session: dict, patterns: list[re.Pattern]) -> str | None:
+# A compiled title rule: (plain-language label, compiled regex).
+CompiledRule = tuple[str, re.Pattern]
+
+
+def _first_match(session: dict, rules: list[CompiledRule]) -> str | None:
     title = session_title(session)
-    for pat in patterns:
+    for label, pat in rules:
         if pat.search(title):
-            return pat.pattern
+            return label
     return None
 
 
-def matches_keep(session: dict, patterns: list[re.Pattern]) -> str | None:
-    """Engineering-looking titles that override the exclusion patterns."""
-    title = session_title(session)
-    for pat in patterns:
-        if pat.search(title):
-            return pat.pattern
-    return None
+def matches_exclusion(session: dict, rules: list[CompiledRule]) -> str | None:
+    """Label of the first exclusion rule matching the title, if any."""
+    return _first_match(session, rules)
+
+
+def matches_keep(session: dict, rules: list[CompiledRule]) -> str | None:
+    """Engineering-looking titles that override the exclusion rules."""
+    return _first_match(session, rules)
 
 
 def is_substantive(session: dict, messages: list[dict], min_tool_calls: int) -> bool:
@@ -266,15 +290,24 @@ class FilterOptions:
     until: float | None = None
     exclude_missing_session_key: bool = False
     min_tool_calls: int = 1
-    extra_exclude_patterns: list[str] = field(default_factory=list)
-    extra_keep_patterns: list[str] = field(default_factory=list)
+    extra_exclude_patterns: list[str] = field(default_factory=list)  # raw regexes
+    extra_keep_patterns: list[str] = field(default_factory=list)     # raw regexes
     exclude_tools: set[str] = field(default_factory=lambda: set(DEFAULT_EXCLUDE_TOOLS))
+    disabled_rules: set[str] = field(default_factory=set)  # TitleRule ids switched off
 
     def __post_init__(self) -> None:
-        self.exclude_re = [re.compile(p, re.IGNORECASE)
-                           for p in DEFAULT_EXCLUDE_PATTERNS + list(self.extra_exclude_patterns)]
-        self.keep_re = [re.compile(p, re.IGNORECASE)
-                        for p in DEFAULT_KEEP_PATTERNS + list(self.extra_keep_patterns)]
+        known = {r.id for r in EXCLUDE_RULES + KEEP_RULES}
+        unknown = set(self.disabled_rules) - known
+        if unknown:
+            raise ValueError(f"unknown rule id(s): {', '.join(sorted(unknown))} "
+                             f"(see --list-rules)")
+        self.exclude_re = self._compile(EXCLUDE_RULES, self.extra_exclude_patterns)
+        self.keep_re = self._compile(KEEP_RULES, self.extra_keep_patterns)
+
+    def _compile(self, builtin: list[TitleRule], extra: list[str]) -> list[CompiledRule]:
+        rules = [(r.label, re.compile(r.pattern, re.IGNORECASE))
+                 for r in builtin if r.id not in self.disabled_rules]
+        return rules + [(f"/{p}/", re.compile(p, re.IGNORECASE)) for p in extra]
 
 
 @dataclass
@@ -321,10 +354,10 @@ def evaluate_session(conn: sqlite3.Connection, session: dict,
     keep_match = matches_keep(session, opts.keep_re)
     exc_match = matches_exclusion(session, opts.exclude_re)
     if exc_match and keep_match:
-        notes.append(f"title matches exclusion '{exc_match}' but keep pattern "
-                     f"'{keep_match}' overrides it")
+        notes.append(f"title mentions {exc_match}, but kept because it also "
+                     f"mentions {keep_match}")
     elif exc_match:
-        reasons.append(Reason("excluded_title", f"matches exclusion: '{exc_match}'"))
+        reasons.append(Reason("excluded_title", f"title mentions {exc_match}"))
 
     msgs = get_session_messages(conn, sid)
     if not msgs:
@@ -333,8 +366,8 @@ def evaluate_session(conn: sqlite3.Connection, session: dict,
     tools = get_session_tools(conn, sid)
     used = tools & opts.exclude_tools
     if used and keep_match:
-        notes.append(f"used excluded tool {', '.join(sorted(used))} but keep pattern "
-                     f"'{keep_match}' overrides it")
+        notes.append(f"used skipped tool {', '.join(sorted(used))}, but kept because "
+                     f"the title mentions {keep_match}")
     elif used:
         reasons.append(Reason("excluded_tool", f"used excluded tool: {', '.join(sorted(used))}"))
 
@@ -396,35 +429,75 @@ def format_conversation(messages: list[dict], session: dict) -> str:
 # Retain
 # ---------------------------------------------------------------------------
 
-def backfill_document_id(session_id: str) -> str:
-    """Hindsight document id for a backfilled session.
-
-    Deliberately NOT the bare session id: the Hindsight Hermes plugin uses the
-    bare session id as its own document id (with update_mode=append), and a
-    retain with the same document id would replace that live document.
-    """
-    return f"{TAG}:{session_id}"
-
-
 def build_retain_payload(session: dict, text: str, bank_id: str) -> dict:
-    """Exactly what retain_payload() sends. Shown verbatim by dry runs.
+    """Exactly what retain_payload() sends. Shown verbatim by previews.
 
-    Identity follows the Hindsight Hermes plugin's convention — a full
-    ``session:<id>`` tag and ``session_id`` metadata — so one duplicate check
-    matches sessions captured live and sessions backfilled by this tool.
+    Identity follows the Hindsight Hermes plugin's convention — document id =
+    session id, a ``session:<id>`` tag and ``session_id`` metadata — so a
+    session has one document no matter which path stored it. The ``backfill``
+    tag records where it came from.
     """
     sid = session["id"]
     return {
         "bank_id": bank_id,
-        "document_id": backfill_document_id(sid),
+        "document_id": sid,
         "content": text,
         "tags": [TAG, f"session:{sid}"],
         "metadata": {"session_id": sid, "source": SOURCE},
     }
 
 
+class AlreadyInHindsight(Exception):
+    """Refused: the bank already holds a document for this session."""
+
+    def __init__(self, session_id: str, document_ids: list[str]):
+        self.document_ids = document_ids
+        super().__init__(f"already in Hindsight (document {', '.join(document_ids)}); not sent")
+
+
+def find_session_documents(url: str, bank_id: str, session_id: str,
+                           api_key: str | None = None) -> list[str]:
+    """Ids of documents in the bank that belong to this session (read-only).
+
+    Checks both the document id (the plugin's and ours) and the
+    ``session:<id>`` tag (covers the plugin's older ``<id>-<timestamp>`` ids).
+    """
+    found: list[str] = []
+    bank = urllib.parse.quote(bank_id, safe="")
+    try:
+        doc = _api_get(url, f"/v1/default/banks/{bank}/documents/"
+                            f"{urllib.parse.quote(session_id, safe='')}", api_key=api_key)
+        found.append(doc.get("id") or session_id)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+    page = _api_get(url, f"/v1/default/banks/{bank}/documents",
+                    {"tags": f"session:{session_id}", "tags_match": "any_strict", "limit": 50},
+                    api_key=api_key)
+    for d in page.get("items") or []:
+        if d.get("id") and d["id"] not in found:
+            found.append(d["id"])
+    return found
+
+
+def retain_new(client: Hindsight, payload: dict, url: str,
+               api_key: str | None = None) -> None:
+    """Retain only if the session isn't in the bank yet.
+
+    Retaining with an existing document id would *replace* that document —
+    for a live-captured session, its plugin document — so a session that is
+    already present is refused with AlreadyInHindsight instead. To re-send a
+    session, delete its document in Hindsight first.
+    """
+    sid = payload["metadata"]["session_id"]
+    existing = find_session_documents(url, payload["bank_id"], sid, api_key)
+    if existing:
+        raise AlreadyInHindsight(sid, existing)
+    retain_payload(client, payload)
+
+
 def retain_payload(client: Hindsight, payload: dict) -> None:
-    """Send one payload. Raises on failure."""
+    """Send one payload unconditionally. Raises on failure. Prefer retain_new()."""
     client.retain(
         bank_id=payload["bank_id"],
         content=payload["content"],
@@ -532,9 +605,8 @@ def fetch_bank_session_index(url: str, bank_id: str, api_key: str | None = None,
             meta = doc.get("document_metadata") or {}
             if meta.get("session_id"):
                 exact.add(meta["session_id"])
-            doc_id = doc.get("id") or ""
-            if doc_id.startswith(f"{TAG}:"):
-                exact.add(doc_id[len(TAG) + 1:])
+            if doc.get("id"):
+                exact.add(doc["id"])  # plugin and backfill both use the session id
             is_backfill = TAG in tags
             for t in tags:
                 if not t.startswith("session:"):
@@ -593,26 +665,42 @@ def main():
                          "Matched against messages.tool_name — precise, unlike title regexes.")
     ap.add_argument("--no-exclude-tools", action="store_true",
                     help="Disable tool-based exclusion entirely (keeps every session, including meal logs)")
+    ap.add_argument("--disable-rule", action="append", default=[], metavar="RULE_ID",
+                    help="Switch off a built-in title rule by id (repeatable; see --list-rules)")
+    ap.add_argument("--list-rules", action="store_true",
+                    help="List the built-in title rules with their ids and exit")
     args = ap.parse_args()
 
-    if not args.db.exists():
-        print(f"DB not found: {args.db}")
-        sys.exit(1)
+    if args.list_rules:
+        for heading, rules in (("Skip sessions whose title mentions:", EXCLUDE_RULES),
+                               ("Always keep sessions whose title mentions (overrides skips):", KEEP_RULES)):
+            print(heading)
+            for r in rules:
+                print(f"  {r.id:<16} {r.label}")
+        return
 
     state_path = args.state_file or (args.db.parent / ".backfill_state.json")
     # Always load state; --skip-tagged controls whether we act on it
     done = load_state(state_path)
 
-    opts = FilterOptions(
-        min_turns=args.min_turns,
-        days=args.days,
-        until=args.until,
-        exclude_missing_session_key=args.exclude_missing_session_key,
-        min_tool_calls=args.min_tool_calls,
-        extra_exclude_patterns=args.exclude_pattern,
-        extra_keep_patterns=args.keep_pattern,
-        exclude_tools=set() if args.no_exclude_tools else set(args.exclude_tool),
-    )
+    try:
+        opts = FilterOptions(
+            min_turns=args.min_turns,
+            days=args.days,
+            until=args.until,
+            exclude_missing_session_key=args.exclude_missing_session_key,
+            min_tool_calls=args.min_tool_calls,
+            extra_exclude_patterns=args.exclude_pattern,
+            extra_keep_patterns=args.keep_pattern,
+            exclude_tools=set() if args.no_exclude_tools else set(args.exclude_tool),
+            disabled_rules=set(args.disable_rule),
+        )
+    except (ValueError, re.error) as exc:
+        ap.error(str(exc))
+
+    if not args.db.exists():
+        print(f"DB not found: {args.db}")
+        sys.exit(1)
 
     print(f"DB: {args.db}")
     print(f"Min turns (exchanges): {args.min_turns}, Days: {args.days}, Dry run: {args.dry_run}")
@@ -667,7 +755,12 @@ def main():
             done.add(sid)
             continue
         try:
-            retain_payload(client, payload)
+            retain_new(client, payload, args.url)
+        except AlreadyInHindsight as exc:
+            print(f"skip ({exc})")
+            skipped += 1
+            done.add(sid)
+            continue
         except Exception as exc:
             print(f"  FAIL: {exc}")
             fail += 1
