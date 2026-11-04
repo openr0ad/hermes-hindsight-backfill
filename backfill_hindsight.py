@@ -321,10 +321,10 @@ def evaluate_session(conn: sqlite3.Connection, session: dict,
     keep_match = matches_keep(session, opts.keep_re)
     exc_match = matches_exclusion(session, opts.exclude_re)
     if exc_match and keep_match:
-        notes.append(f"title matches exclusion {exc_match!r} but keep pattern "
-                     f"{keep_match!r} overrides it")
+        notes.append(f"title matches exclusion '{exc_match}' but keep pattern "
+                     f"'{keep_match}' overrides it")
     elif exc_match:
-        reasons.append(Reason("excluded_title", f"matches exclusion: {exc_match!r}"))
+        reasons.append(Reason("excluded_title", f"matches exclusion: '{exc_match}'"))
 
     msgs = get_session_messages(conn, sid)
     if not msgs:
@@ -334,7 +334,7 @@ def evaluate_session(conn: sqlite3.Connection, session: dict,
     used = tools & opts.exclude_tools
     if used and keep_match:
         notes.append(f"used excluded tool {', '.join(sorted(used))} but keep pattern "
-                     f"{keep_match!r} overrides it")
+                     f"'{keep_match}' overrides it")
     elif used:
         reasons.append(Reason("excluded_tool", f"used excluded tool: {', '.join(sorted(used))}"))
 
@@ -483,6 +483,9 @@ def check_hindsight(url: str, bank_id: str, api_key: str | None = None) -> dict:
     try:
         v = _api_get(url, "/version", api_key=api_key, timeout=5)
         out["version"] = v.get("api_version")
+    except urllib.error.HTTPError as exc:
+        hint = " — is this the Hindsight API port (not the Control Plane UI)?" if exc.code == 404 else ""
+        return {**out, "ok": False, "error": f"HTTP {exc.code}{hint}"}
     except Exception as exc:
         return {**out, "ok": False, "error": str(exc)}
     try:
