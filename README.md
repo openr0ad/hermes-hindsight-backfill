@@ -161,13 +161,48 @@ python3 backfill_hindsight.py --days 90 | grep -E " retained|Done."
 python3 backfill_hindsight.py --no-skip-tagged
 ```
 
+## Hermes profiles and banks
+
+Each Hermes profile keeps its own sessions and can send its memories to its
+own Hindsight bank:
+
+| Profile        | Sessions database                       | Bank comes from                                  |
+| -------------- | --------------------------------------- | ------------------------------------------------ |
+| `default`      | `~/.hermes/state.db`                    | `~/.hermes/hindsight/config.json`                |
+| `<name>`       | `~/.hermes/profiles/<name>/state.db`    | `~/.hermes/profiles/<name>/hindsight/config.json` |
+
+The bank is picked the same way the Hindsight Hermes plugin picks it, so
+backfilled sessions land where that profile's live sessions go:
+
+- `bank_id` from the profile's `hindsight/config.json`, or
+- `bank_id_template`, if it only uses `{profile}` (e.g. `hermes-{profile}`), or
+- the shared `~/.hindsight/config.json`, if the profile has no config of its own.
+
+If none of these applies, or the template depends on the session (e.g.
+`{project}`), the tool can't tell which bank to use. The CLI then requires
+`--bank-id`, and the web UI asks you to choose. Several profiles may share a
+bank. Backups under `state-snapshots/` are ignored.
+
+```bash
+python3 backfill_hindsight.py --list-profiles
+python3 backfill_hindsight.py --profile ops --dry-run
+python3 backfill_hindsight.py --profile coder --bank-id hermes --dry-run   # no bank configured
+```
+
+Sessions are only ever sent to banks that already exist in Hindsight.
+Hindsight would otherwise create a new bank on the first write, so a typo
+would quietly start a new, empty memory.
+
 ## Options
 
 | Flag                | Default                          | Description                                                    |
 | ------------------- | -------------------------------- | -------------------------------------------------------------- |
-| `--db`              | `$HERMES_DB` → `~/.hermes/state.db` | Path to Hermes session database (opened read-only)          |
+| `--profile`         | —                                | Hermes profile: use its session DB and its Hindsight bank (see [Profiles](#hermes-profiles-and-banks)) |
+| `--list-profiles`   | —                                | List profiles with their DB and bank, then exit                |
+| `--hermes-home`     | `$HERMES_HOME` → `~/.hermes`     | Where Hermes keeps `state.db` and `profiles/`                  |
+| `--db`              | profile's, else `$HERMES_DB` → `~/.hermes/state.db` | Path to Hermes session database (opened read-only) |
 | `--url`             | `$HINDSIGHT_API_URL` → `http://localhost:8888` | Hindsight API base URL (Hindsight is often on another host) |
-| `--bank-id`         | `$HINDSIGHT_BANK` → `hermes`     | Hindsight memory bank ID                                       |
+| `--bank-id`         | profile's, else `$HINDSIGHT_BANK` → `hermes` | Hindsight memory bank ID                           |
 | `--min-turns`       | `6`                              | Minimum exchanges (user+assistant pairs) per session           |
 | `--days`            | `90`                             | How far back to look                                           |
 | `--until`           | none                             | Upper bound: only sessions started on/before this date (`YYYY-MM-DD` = end of day, inclusive) |
@@ -194,8 +229,12 @@ as Hermes (e.g. a Raspberry Pi) and be opened from any browser on your LAN.
 
 What it does:
 
-- **Connection status**: whether the Hermes DB is found and readable, and
-  whether the Hindsight API and bank are reachable.
+- **Profile and bank**: pick a Hermes profile. Its sessions load, and its
+  bank is selected (see [Profiles](#hermes-profiles-and-banks)). You can send
+  to a different existing bank; the UI notes when that differs from the
+  profile's own.
+- **Connection status**: whether the profile's Hermes DB is found and
+  readable, and whether the Hindsight API and bank are reachable.
 - **Session list**: every session in the date window, with *all* the reasons
   the filters exclude it (too few turns, title pattern, excluded tool, chat
   only, too short) plus keep-pattern overrides.
@@ -231,15 +270,14 @@ cp config.example.env config.env   # then edit
 
 | Variable            | Default                 | Description                                   |
 | ------------------- | ----------------------- | --------------------------------------------- |
-| `HERMES_DB`         | `~/.hermes/state.db`    | Hermes DB (relative paths are relative to the working directory) |
+| `HERMES_HOME`       | `~/.hermes`             | Hermes home with `state.db` and `profiles/` (relative paths are relative to the working directory) |
 | `HINDSIGHT_API_URL` | `http://localhost:8888` | Hindsight **API** URL                         |
 | `HINDSIGHT_API_KEY` | —                       | Bearer token, if your API requires one        |
-| `HINDSIGHT_BANK`    | `hermes`                | Bank to write to and check                    |
 | `WEBUI_HOST`        | `0.0.0.0`               | Bind address                                  |
 | `WEBUI_PORT`        | `8765`                  | Port                                          |
 
-The CLI reads `HERMES_DB`, `HINDSIGHT_API_URL` and `HINDSIGHT_BANK` from the
-environment too. It does not read `config.env`.
+The CLI reads `HERMES_HOME`, `HERMES_DB`, `HINDSIGHT_API_URL` and
+`HINDSIGHT_BANK` from the environment too. It does not read `config.env`.
 
 ### Running on a Raspberry Pi
 
@@ -292,13 +330,24 @@ journalctl -u hermes-backfill-webui -f    # logs
 
 ### Development (Windows or any other machine)
 
-Copy the Hermes DB from the Pi into `dev-data/` (git-ignored). Copy
-`state.db` together with its `-wal` and `-shm` files. Then point the config at
-it:
+Copy the Pi's Hermes layout into `dev-data/` (git-ignored), mirroring
+`~/.hermes`:
+
+```
+dev-data/
+  state.db, state.db-wal, state.db-shm      # default profile
+  hindsight/config.json                     # default profile's bank
+  profiles/<name>/state.db (+ -wal, -shm)
+  profiles/<name>/hindsight/config.json
+```
+
+Copy each `state.db` together with its `-wal` and `-shm` files. The
+`hindsight/config.json` files may contain an API key; `dev-data/` is never
+committed. Then point the config at it:
 
 ```ini
 # config.env
-HERMES_DB=./dev-data/state.db
+HERMES_HOME=./dev-data
 HINDSIGHT_API_URL=http://<hindsight-host>:8888
 WEBUI_HOST=127.0.0.1
 ```
@@ -307,7 +356,7 @@ WEBUI_HOST=127.0.0.1
 uv run webui.py
 ```
 
-The DB is always opened read-only.
+Databases are always opened read-only.
 
 ## Tuning title rules
 
