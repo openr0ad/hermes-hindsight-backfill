@@ -260,7 +260,7 @@ What it does:
 - **Title rules** in plain language ("Skip sessions whose title mentions
   *breakfast*"), each with its own checkbox, plus your own words or phrases.
   An advanced option takes regular expressions instead.
-- **Preview** (selected rows, or **View** on a single row): shows exactly what
+- **Preview** (selected rows, or click a session title): shows exactly what
   would be sent — document id, tags, metadata and the full text. Nothing is sent.
 - **Send selected to Hindsight**: retains the selected sessions one at a time
   and shows the result for each. Sessions Hindsight already has are refused
@@ -404,7 +404,7 @@ entries are plain words or phrases (matched as whole words, ignoring case).
 Rules match only on the session **title**, not message content. A session
 that starts as a food log but pivots into a technical discussion will have a
 food-themed title and can get excluded. Review borderline sessions with
-`--show-text` (or **View** in the web UI) before sending.
+`--show-text` (or click its title in the web UI) before sending.
 
 To change the built-ins permanently, edit `EXCLUDE_RULES` / `KEEP_RULES` at the
 top of the script.

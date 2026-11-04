@@ -48,7 +48,9 @@
   tr.manual td:first-child { box-shadow: inset 4px 0 0 var(--manual); }
   tr.excluded td.title { color:var(--muted); }
   td.num { text-align:right; font-variant-numeric:tabular-nums; }
-  td.date { white-space:nowrap; } td.icon { text-align:center; }
+  td.date { white-space:nowrap; }
+  button.plain { all:unset; cursor:pointer; color:inherit; font:inherit; text-align:left; }
+  button.plain:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:2px; } td.icon { text-align:center; }
   .hs { font-weight:700; font-size:15px; cursor:help; } .hs.ok { color:var(--ok); } .hs.bad { color:var(--bad); }
   .hs.warn { color:var(--warn); } .hs.info { color:var(--muted); } td.why { min-width:220px; }
   .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:12px; border:1px solid currentColor; margin:1px 2px 1px 0; white-space:nowrap; }
@@ -125,9 +127,9 @@
         <thead><tr>
           <th><input type="checkbox" id="chk-visible" title="Tick/untick all rows shown"></th>
           <th>Started</th><th>Title</th><th class="num">Msgs</th><th class="num">Tools</th>
-          <th title="✓ ingested or exists in the chosen bank · ✗ not found">In Hindsight</th><th>Rules</th><th>Why</th><th>Result</th><th></th>
+          <th title="✓ ingested or exists in the chosen bank · ✗ not found">In Hindsight</th><th>Rules</th><th>Why</th><th>Result</th>
         </tr></thead>
-        <tbody id="rows"><tr><td colspan="10" class="muted">Load sessions to begin.</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="9" class="muted">Load sessions to begin.</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -291,7 +293,7 @@ function visible() {
 function render() {
   const tb = $("rows"); tb.replaceChildren();
   const vis = visible();
-  if (!vis.length) tb.append(el("tr", {}, el("td", { colspan: 10, class: "muted", text: S.sessions.length ? "No rows in this view." : "No sessions loaded." })));
+  if (!vis.length) tb.append(el("tr", {}, el("td", { colspan: 9, class: "muted", text: S.sessions.length ? "No rows in this view." : "No sessions loaded." })));
   for (const s of vis) {
     const cb = el("input", { type: "checkbox", onchange: (ev) => { setSel(s.id, ev.target.checked); render(); } });
     cb.checked = !!S.sel.get(s.id); cb.disabled = S.busy;
@@ -305,12 +307,15 @@ function render() {
       : res.ok ? tag("sent", "ok") : res.skipped ? tag("not sent: already there", "warn", res.error)
       : el("span", { class: "err", text: "failed: " + res.error });
     const tools = el("td", { class: "num", title: s.tools.join(", "), text: String(s.tool_call_count) });
-    const view = el("button", { class: "small", title: "Show exactly what would be sent for this session", onclick: () => preview([s.id]) }, "View");
+    // The title opens the preview. It's a button for keyboard access, styled
+    // as plain text: no link colour, underline or visited state.
+    const titleBtn = el("button", { class: "plain", title: `Click to see exactly what would be sent\nSession ${s.id}`,
+                                    onclick: () => preview([s.id]) }, s.title);
     tb.append(el("tr", { class: (s.included ? "" : "excluded ") + (S.manual.has(s.id) ? "manual" : "") },
-      el("td", {}, cb), el("td", { class: "date", text: s.started }), el("td", { class: "title", title: s.id, text: s.title }),
+      el("td", {}, cb), el("td", { class: "date", text: s.started }), el("td", { class: "title" }, titleBtn),
       el("td", { class: "num", text: String(s.message_count) }), tools, el("td", { class: "icon" }, dupCell),
       el("td", {}, s.included ? tag("pass", "ok") : tag("skipped", "bad")),
-      el("td", { class: "why" }, why), el("td", {}, resCell), el("td", {}, view)));
+      el("td", { class: "why" }, why), el("td", {}, resCell)));
   }
   const n = [...S.sel.values()].filter(Boolean).length;
   $("counts").textContent = S.sessions.length ? `${n} selected · ${S.manual.size} changed by hand` : "";
