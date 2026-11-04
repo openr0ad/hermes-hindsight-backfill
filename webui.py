@@ -102,7 +102,7 @@ def _filter_options(body: dict) -> core.FilterOptions:
     tools = body.get("exclude_tools")
     try:
         return core.FilterOptions(
-            min_turns=num("min_turns", 6),
+            min_turns=num("min_turns", 5),
             days=num("days", 90),
             until=until,
             exclude_missing_session_key=bool(body.get("exclude_missing_session_key")),

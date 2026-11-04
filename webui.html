@@ -112,7 +112,7 @@
       <label class="muted">Show <select id="view">
         <option value="all">All</option><option value="selected">Selected</option>
         <option value="included">Passed the rules</option><option value="excluded">Skipped by the rules</option>
-        <option value="dup">Already in Hindsight</option><option value="manual">Changed by hand</option>
+        <option value="dup">In Hindsight (✓)</option><option value="maybe">Maybe in Hindsight (?)</option><option value="absent">Not in Hindsight (✗)</option><option value="manual">Changed by hand</option>
       </select></label>
       <span class="sep"></span>
       <button id="btn-dry" title="Show exactly what would be sent for the selected sessions. Nothing is sent.">Preview selected</button>
@@ -285,7 +285,8 @@ function visible() {
   const v = $("view").value;
   return S.sessions.filter(s => v === "all" || (v === "selected" && S.sel.get(s.id)) ||
     (v === "included" && s.included) || (v === "excluded" && !s.included) ||
-    (v === "dup" && s.in_hindsight) || (v === "manual" && S.manual.has(s.id)));
+    (v === "dup" && s.in_hindsight === "exact") || (v === "maybe" && s.in_hindsight === "possible") ||
+    (v === "absent" && S.hs.checked && !s.in_hindsight) || (v === "manual" && S.manual.has(s.id)));
 }
 function render() {
   const tb = $("rows"); tb.replaceChildren();
@@ -318,7 +319,7 @@ function render() {
 function hsIcon(s) {
   const icon = (text, cls, title) => el("span", { class: `hs ${cls}`, text, title, "aria-label": title });
   if (s.in_hindsight === "exact") return icon("✓", "ok", "Ingested or exists in Hindsight");
-  if (s.in_hindsight === "possible") return icon("?", "warn", "Not found by id, but an old backfill (made before sessions were tagged with their full id) exists for a session started the same day. It may be this one.");
+  if (s.in_hindsight === "possible") return icon("?", "warn", "Possibly in Hindsight: not found by id, but an old backfill (made before sessions were tagged with their full id) exists for a session started the same day. Skipped by the rules; tick by hand to send anyway.");
   if (S.hs.checked) return icon("✗", "bad", "Not found in Hindsight");
   return icon("–", "info", S.hs.error || "Not checked: choose a bank");
 }

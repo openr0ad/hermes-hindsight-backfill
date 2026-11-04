@@ -101,7 +101,6 @@ KEEP_RULES = [
     TitleRule("prompt", r"\bprompt", 'words starting with "prompt" (prompt, prompts)'),
     TitleRule("protocol", r"\bprotocol\b", '"protocol"'),
     TitleRule("integration", r"\bintegration\b", '"integration"'),
-    TitleRule("csv", r"\.csv\b", 'a .csv file name'),
     TitleRule("error", r"\berror\b", '"error"'),
     TitleRule("script", r"\bscript", 'words starting with "script" (script, scripts, scripting)'),
     TitleRule("bug", r"\bbug\b", '"bug"'),
@@ -286,7 +285,7 @@ def is_substantive(session: dict, messages: list[dict], min_tool_calls: int) -> 
 @dataclass
 class FilterOptions:
     """Every knob of the filter chain. CLI flags and web UI inputs map onto this."""
-    min_turns: int = 6
+    min_turns: int = 5
     days: int = 90
     until: float | None = None
     exclude_missing_session_key: bool = False
@@ -359,8 +358,9 @@ def evaluate_session(conn: sqlite3.Connection, session: dict,
                               f"already in Hindsight bank '{bank_id}'" if bank_id
                               else "already in Hindsight"))
     elif in_hindsight == "possible":
-        notes.append("an old backfill from the same day exists in Hindsight; "
-                     "it may be this session")
+        reasons.append(Reason("maybe_in_hindsight",
+                              "possibly already in Hindsight: an old backfill from "
+                              "the same day exists and may be this session"))
 
     if (session.get("message_count") or 0) < opts.min_turns * 2:
         reasons.append(Reason("too_few_turns",
@@ -749,7 +749,7 @@ def main():
     ap.add_argument("--db", type=Path, default=None, help="Path to Hermes state.db (default: the profile's, else $HERMES_DB or ~/.hermes/state.db)")
     ap.add_argument("--url", type=str, default=DEFAULT_API_URL, help="Hindsight API base URL (default: $HINDSIGHT_API_URL or http://localhost:8888)")
     ap.add_argument("--bank-id", type=str, default=None, help="Hindsight memory bank ID (default: the profile's bank, else $HINDSIGHT_BANK or hermes)")
-    ap.add_argument("--min-turns", type=int, default=6, help="Minimum exchanges (user+assistant pairs)")
+    ap.add_argument("--min-turns", type=int, default=5, help="Minimum exchanges (user+assistant pairs)")
     ap.add_argument("--days", type=int, default=90, help="Look back N days")
     ap.add_argument("--until", type=parse_date_arg, default=None,
                     help="Only include sessions started on/before this date (YYYY-MM-DD or 'YYYY-MM-DD HH:MM'). "

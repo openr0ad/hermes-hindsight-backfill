@@ -18,7 +18,10 @@ Sessions pass through these filters before being retained:
 
 0. **Already in Hindsight** — sessions the target bank already holds (matched
    on the full session id, from the live Hermes plugin or an earlier backfill)
-   are skipped. The tool lists the bank's documents once per run (read-only).
+   are skipped. So are sessions that *may* be there: ones started on a day
+   that has an old date-only backfill (see
+   [Session identity](#session-identity-in-hindsight)). The tool lists the
+   bank's documents once per run (read-only).
    A dry run that can't reach Hindsight just warns and carries on
 1. **Date + turn filter** — must be within `--days` window (and on/before
    `--until` if given) and have at least `--min-turns` exchanges
@@ -95,11 +98,13 @@ The meal words in the title rules remain as a fallback for older
 sessions that logged meals without going through the plugin.
 
 **Engineering work wins.** Any title mentioning a keep word (`fix`,
-`rebuild`, `debug`, `prompt`, `protocol`, `integration`, `.csv`, `error`,
+`rebuild`, `debug`, `prompt`, `protocol`, `integration`, `error`,
 `script`, `bug`, `skill`, `schema`, `cron`) is kept regardless of both filters —
 so *"Rebuilding meals.csv after write error"* and *"New nutrition logging
 integration protocol"* are retained as the technical sessions they are, while
 *"Log meals for today"* is dropped. Extend with `--keep-pattern`.
+(A `.csv` file name is deliberately *not* a keep word: meal logging itself
+works with `meals.csv` and `common_items.csv`.)
 
 A session that logs a meal *and* does technical work is skipped unless its title
 matches a keep pattern — `--no-exclude-tools` is the broader escape hatch.
@@ -140,11 +145,11 @@ python3 backfill_hindsight.py --dry-run
 # Inspect session text before committing
 python3 backfill_hindsight.py --dry-run --show-text --limit 3
 
-# Real run: last 90 days, min 6 turns
-python3 backfill_hindsight.py --days 90 --min-turns 6
+# Real run: last 90 days, min 5 exchanges (the default)
+python3 backfill_hindsight.py --days 90 --min-turns 5
 
 # Target a specific window (e.g. an ingestion gap): Oct 6 through Oct 31
-python3 backfill_hindsight.py --days 31 --until 2026-10-31 --min-turns 6
+python3 backfill_hindsight.py --days 31 --until 2026-10-31
 
 # Custom Hindsight server and bank
 python3 backfill_hindsight.py --url http://my-server:8888 --bank-id my-bank
@@ -207,7 +212,7 @@ would quietly start a new, empty memory.
 | `--db`              | profile's, else `$HERMES_DB` → `~/.hermes/state.db` | Path to Hermes session database (opened read-only) |
 | `--url`             | `$HINDSIGHT_API_URL` → `http://localhost:8888` | Hindsight API base URL (Hindsight is often on another host) |
 | `--bank-id`         | profile's, else `$HINDSIGHT_BANK` → `hermes` | Hindsight memory bank ID                           |
-| `--min-turns`       | `6`                              | Minimum exchanges (user+assistant pairs) per session           |
+| `--min-turns`       | `5`                              | Minimum exchanges (user+assistant pairs) per session           |
 | `--days`            | `90`                             | How far back to look                                           |
 | `--until`           | none                             | Upper bound: only sessions started on/before this date (`YYYY-MM-DD` = end of day, inclusive) |
 | `--limit`           | `0` (all)                        | Cap sessions processed                                         |
@@ -246,7 +251,9 @@ What it does:
   sessions it already has (read-only). ✓ = ingested or exists, ✗ = not found,
   ? = an old date-only backfill from the same day exists (see
   [Session identity](#session-identity-in-hindsight)), – = not checked (no bank
-  chosen, or Hindsight unreachable). Sessions with ✓ are skipped by the rules.
+  chosen, or Hindsight unreachable). Sessions with ✓ or ? are skipped by the
+  rules (tick a ? row by hand to send it anyway). The **Show** menu can list
+  just the ✓, ? or ✗ rows.
   Changing the bank reloads the list.
 - **Selection**: tick/untick rows, select all / none, reset to the filters.
   A manual selection overrides the filters.
