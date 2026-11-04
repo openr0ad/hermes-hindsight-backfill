@@ -333,7 +333,7 @@ regexes with `--exclude-pattern` / `--keep-pattern`:
 
 ```bash
 python3 backfill_hindsight.py --dry-run --disable-rule breakfast --disable-rule lunch
-python3 backfill_hindsight.py --dry-run --exclude-pattern "grocer(y|ies)"
+python3 backfill_hindsight.py --dry-run --exclude-pattern "\bgrocer(y|ies)\b"
 ```
 
 In the web UI the same rules are checkboxes under **Title rules**, and custom
