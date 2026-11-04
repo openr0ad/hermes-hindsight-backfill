@@ -14,8 +14,12 @@ Hindsight only captures sessions going forward from when it was set up. This scr
 
 ## Filter pipeline
 
-Sessions pass through a five-stage filter before being retained:
+Sessions pass through these filters before being retained:
 
+0. **Already in Hindsight** — sessions the target bank already holds (matched
+   on the full session id, from the live Hermes plugin or an earlier backfill)
+   are skipped. The tool lists the bank's documents once per run (read-only).
+   A dry run that can't reach Hindsight just warns and carries on
 1. **Date + turn filter** — must be within `--days` window (and on/before
    `--until` if given) and have at least `--min-turns` exchanges
 2. **Title rules** — sessions whose title mentions a skip word (`EXCLUDE_RULES`,
@@ -29,7 +33,7 @@ Sessions pass through a five-stage filter before being retained:
 A state file (`~/.hermes/.backfill_state.json`) tracks retained session IDs
 so CLI re-runs skip already-processed sessions automatically. Pass
 `--no-skip-tagged` to reprocess everything. (The web UI doesn't use this
-file; it asks Hindsight directly — see [Duplicate check](#duplicate-check).)
+file; it asks Hindsight directly — see filter 0 above.)
 
 ## Session identity in Hindsight
 
@@ -56,7 +60,7 @@ session, delete its document in Hindsight first.
 > **Older backfills** (before this change) were tagged only
 > `session:<first 8 chars>`, which for Hermes ids is just the date
 > (`YYYYMMDD`). They have random document ids and can't be tied to one
-> session; the duplicate check reports them as *possible* duplicates for every
+> session; the In Hindsight column marks them with ? (possibly present) for every
 > session started that day.
 
 ### Sessions with a NULL `session_key`
@@ -130,7 +134,7 @@ uv run backfill_hindsight.py
 ## Usage
 
 ```bash
-# Dry run — preview what would be retained (no writes, no Hindsight calls)
+# Dry run — preview what would be retained (no writes; reads Hindsight to skip what's there)
 python3 backfill_hindsight.py --dry-run
 
 # Inspect session text before committing
@@ -236,8 +240,14 @@ What it does:
 - **Connection status**: whether the profile's Hermes DB is found and
   readable, and whether the Hindsight API and bank are reachable.
 - **Session list**: every session in the date window, with *all* the reasons
-  the filters exclude it (too few turns, title pattern, excluded tool, chat
-  only, too short) plus keep-pattern overrides.
+  the rules skip it (already in Hindsight, too few turns, title, skipped tool,
+  chat only, too short) plus keep-word overrides.
+- **In Hindsight** column: **Load sessions** also asks the chosen bank which
+  sessions it already has (read-only). ✓ = ingested or exists, ✗ = not found,
+  ? = an old date-only backfill from the same day exists (see
+  [Session identity](#session-identity-in-hindsight)), – = not checked (no bank
+  chosen, or Hindsight unreachable). Sessions with ✓ are skipped by the rules.
+  Changing the bank reloads the list.
 - **Selection**: tick/untick rows, select all / none, reset to the filters.
   A manual selection overrides the filters.
 - **Title rules** in plain language ("Skip sessions whose title mentions
@@ -248,11 +258,6 @@ What it does:
 - **Send selected to Hindsight**: retains the selected sessions one at a time
   and shows the result for each. Sessions Hindsight already has are refused
   ("not sent: already there") — see [Session identity](#session-identity-in-hindsight).
-- <a id="duplicate-check"></a>**Check what's already in Hindsight** (on demand): lists the
-  bank's documents (read-only) and marks sessions that are already present,
-  matched on the full session id from either the live Hermes plugin or this
-  tool. Exact duplicates are deselected. Old date-only backfills show as
-  *possible* duplicates (see [Session identity](#session-identity-in-hindsight)).
 
 > ⚠️ There is **no authentication**. By default it listens on `0.0.0.0`, so
 > anyone on your LAN can open it and commit to Hindsight. Set

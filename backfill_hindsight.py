@@ -329,6 +329,7 @@ class Verdict:
     notes: list[str]               # informational, e.g. keep-pattern override
     tools: set[str]
     text: str | None               # formatted retain text (None if no messages)
+    in_hindsight: str | None = None  # "exact" / "possible" / None (see duplicate_status)
 
     @property
     def included(self) -> bool:
@@ -336,16 +337,30 @@ class Verdict:
 
 
 def evaluate_session(conn: sqlite3.Connection, session: dict,
-                     opts: FilterOptions) -> Verdict:
+                     opts: FilterOptions,
+                     bank_index: BankSessionIndex | None = None,
+                     bank_id: str | None = None) -> Verdict:
     """Run the full filter chain on one session.
 
     Unlike the original CLI loop this does not stop at the first failing
     check: every reason is collected so the web UI can show all of them. The
     order matches the CLI pipeline, so reasons[0] is what the CLI reports.
+
+    With a bank_index (from fetch_bank_session_index), sessions the bank
+    already holds are skipped too — that check comes first.
     """
     sid = session["id"]
     reasons: list[Reason] = []
     notes: list[str] = []
+
+    in_hindsight = duplicate_status(sid, bank_index) if bank_index else None
+    if in_hindsight == "exact":
+        reasons.append(Reason("in_hindsight",
+                              f"already in Hindsight bank '{bank_id}'" if bank_id
+                              else "already in Hindsight"))
+    elif in_hindsight == "possible":
+        notes.append("an old backfill from the same day exists in Hindsight; "
+                     "it may be this session")
 
     if (session.get("message_count") or 0) < opts.min_turns * 2:
         reasons.append(Reason("too_few_turns",
@@ -385,7 +400,8 @@ def evaluate_session(conn: sqlite3.Connection, session: dict,
         if len(text.strip()) < MIN_TEXT_CHARS:
             reasons.append(Reason("too_short", "too short"))
 
-    return Verdict(session=session, reasons=reasons, notes=notes, tools=tools, text=text)
+    return Verdict(session=session, reasons=reasons, notes=notes, tools=tools, text=text,
+                   in_hindsight=in_hindsight)
 
 
 # ---------------------------------------------------------------------------
@@ -838,6 +854,26 @@ def main():
         print("Nothing to do.")
         return
 
+    # Which sessions the bank already has (read-only). Those are skipped by
+    # the rules; real sends are also guarded per session by retain_new().
+    bank_index = None
+    try:
+        banks = list_banks(args.url)
+        if args.bank_id in banks:
+            bank_index = fetch_bank_session_index(args.url, args.bank_id)
+            print(f"Hindsight bank {args.bank_id!r}: {bank_index.documents_scanned} documents checked")
+        elif not args.dry_run:
+            # Hindsight would create the bank on first write; refuse instead.
+            print(f"Bank {args.bank_id!r} does not exist in Hindsight (have: {', '.join(banks)})")
+            sys.exit(1)
+        else:
+            print(f"Note: bank {args.bank_id!r} does not exist in Hindsight")
+    except Exception as exc:
+        if not args.dry_run:
+            print(f"Cannot reach Hindsight at {args.url}: {exc}")
+            sys.exit(1)
+        print(f"Note: could not check Hindsight ({exc}); sessions already there are not marked")
+
     client = None
     if not args.dry_run:
         client = make_client(args.url)
@@ -853,7 +889,7 @@ def main():
             skipped += 1
             continue
 
-        verdict = evaluate_session(conn, s, opts)
+        verdict = evaluate_session(conn, s, opts, bank_index, args.bank_id)
         if not verdict.included:
             print(f"skip ({verdict.reasons[0].message})")
             skipped += 1

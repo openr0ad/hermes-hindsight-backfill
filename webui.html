@@ -48,7 +48,9 @@
   tr.manual td:first-child { box-shadow: inset 4px 0 0 var(--manual); }
   tr.excluded td.title { color:var(--muted); }
   td.num { text-align:right; font-variant-numeric:tabular-nums; }
-  td.date { white-space:nowrap; } td.why { min-width:220px; }
+  td.date { white-space:nowrap; } td.icon { text-align:center; }
+  .hs { font-weight:700; font-size:15px; cursor:help; } .hs.ok { color:var(--ok); } .hs.bad { color:var(--bad); }
+  .hs.warn { color:var(--warn); } .hs.info { color:var(--muted); } td.why { min-width:220px; }
   .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:12px; border:1px solid currentColor; margin:1px 2px 1px 0; white-space:nowrap; }
   .tag.ok { color:var(--ok); } .tag.bad { color:var(--bad); } .tag.warn { color:var(--warn); } .tag.info { color:var(--muted); }
   ul.reasons { margin:0; padding-left:16px; } ul.reasons li.note { color:var(--muted); list-style:circle; }
@@ -97,7 +99,7 @@
       <div><label class="inline hint" title="Off: entries match whole words, ignoring case. On: entries are Python regular expressions."><input type="checkbox" id="f-regex"> Advanced: my entries above are regular expressions</label></div>
     </details>
     <div style="margin-top:10px"><button class="primary" id="btn-load">Load sessions</button>
-      <span class="hint">Reads the Hermes database and applies these rules. Nothing is sent.</span></div>
+      <span class="hint">Reads the Hermes database, asks Hindsight which sessions the bank already has, and applies the rules. Nothing is sent.</span></div>
   </section>
 
   <section class="card">
@@ -105,7 +107,7 @@
     <div class="toolbar">
       <button id="btn-all">Select all</button>
       <button id="btn-none">Select none</button>
-      <button id="btn-reset" title="Undo manual ticks: go back to what the rules (and the duplicate check) decided">Reset to rules</button>
+      <button id="btn-reset" title="Undo manual ticks: go back to what the rules decided">Reset to rules</button>
       <span class="sep"></span>
       <label class="muted">Show <select id="view">
         <option value="all">All</option><option value="selected">Selected</option>
@@ -113,7 +115,6 @@
         <option value="dup">Already in Hindsight</option><option value="manual">Changed by hand</option>
       </select></label>
       <span class="sep"></span>
-      <button id="btn-dups" title="Ask Hindsight which of these sessions it already has (read-only)">Check what's already in Hindsight</button>
       <button id="btn-dry" title="Show exactly what would be sent for the selected sessions. Nothing is sent.">Preview selected</button>
       <button class="danger" id="btn-commit">Send selected to Hindsight</button>
       <span class="muted" id="counts"></span>
@@ -124,7 +125,7 @@
         <thead><tr>
           <th><input type="checkbox" id="chk-visible" title="Tick/untick all rows shown"></th>
           <th>Started</th><th>Title</th><th class="num">Msgs</th><th class="num">Tools</th>
-          <th>Rules</th><th>Why</th><th>In Hindsight</th><th>Result</th><th></th>
+          <th title="✓ ingested or exists in the chosen bank · ✗ not found">In Hindsight</th><th>Rules</th><th>Why</th><th>Result</th><th></th>
         </tr></thead>
         <tbody id="rows"><tr><td colspan="10" class="muted">Load sessions to begin.</td></tr></tbody>
       </table>
@@ -141,7 +142,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const S = { sessions: [], byId: new Map(), sel: new Map(), manual: new Set(), dup: {}, result: {}, busy: false, defaults: null,
+const S = { sessions: [], byId: new Map(), sel: new Map(), manual: new Set(), result: {}, hs: {}, busy: false, defaults: null,
             profiles: [], banks: [], profile: "default", bank: "" };
 const ctx = () => ({ profile: S.profile, bank: S.bank });
 
@@ -166,7 +167,7 @@ async function api(path, body) {
 function msg(text, isErr = false) { $("msg").textContent = text; $("msg").className = isErr ? "err" : "muted"; }
 function setBusy(b) {
   S.busy = b;
-  for (const id of ["btn-load", "btn-dups", "btn-dry", "btn-commit", "btn-all", "btn-none", "btn-reset", "f-profile", "f-bank"]) $(id).disabled = b;
+  for (const id of ["btn-load", "btn-dry", "btn-commit", "btn-all", "btn-none", "btn-reset", "f-profile", "f-bank"]) $(id).disabled = b;
 }
 
 // ---- status ---------------------------------------------------------------
@@ -214,11 +215,8 @@ function bankHint() {
 }
 $("f-profile").onchange = () => { S.profile = $("f-profile").value; pickDefaultBank(); loadStatus(); loadSessions(); };
 $("f-bank").onchange = () => {
-  S.bank = $("f-bank").value; bankHint(); loadStatus();
-  // Duplicate status and results belong to the previous bank.
-  S.dup = {}; S.dupChecked = false; S.result = {};
-  for (const s of S.sessions) if (!S.manual.has(s.id)) S.sel.set(s.id, defaultSel(s));
-  $("dry-card").hidden = true; render();
+  // "Already in Hindsight" depends on the bank, so reload with the new one.
+  S.bank = $("f-bank").value; bankHint(); loadStatus(); loadSessions();
 };
 const needBank = () => { if (S.bank) return false; msg("Choose a Hindsight bank first.", true); return true; };
 
@@ -262,16 +260,18 @@ async function loadDefaults() {
 }
 
 // ---- sessions -------------------------------------------------------------
-const defaultSel = (s) => s.included && S.dup[s.id] !== "exact" && !(S.result[s.id] && (S.result[s.id].ok || S.result[s.id].skipped));
+const defaultSel = (s) => s.included && !(S.result[s.id] && (S.result[s.id].ok || S.result[s.id].skipped));
 async function loadSessions() {
-  setBusy(true); msg("Loading sessions and applying the rules…");
+  setBusy(true); msg(S.bank ? `Loading sessions and checking Hindsight bank “${S.bank}”…` : "Loading sessions…");
   try {
     const r = await api("/api/sessions", { ...filterBody(), ...ctx() });
     S.sessions = r.sessions; S.byId = new Map(r.sessions.map(s => [s.id, s]));
-    S.sel = new Map(); S.manual = new Set(); S.dup = {}; S.result = {}; S.dupChecked = false;
+    S.sel = new Map(); S.manual = new Set(); S.result = {}; S.hs = r.hindsight;
     for (const s of S.sessions) S.sel.set(s.id, defaultSel(s));
     $("dry-card").hidden = true;
-    msg(`${r.count} sessions in this date range; ${r.included} pass the rules and are selected.`);
+    const hsText = S.hs.checked ? ` ${r.in_hindsight} already in bank “${S.hs.bank}” (checked ${S.hs.documents_scanned} documents at ${S.hs.checked_at}).`
+      : S.hs.error ? ` Hindsight not checked: ${S.hs.error}.` : " Choose a bank to check what Hindsight already has.";
+    msg(`${r.count} sessions in this date range; ${r.included} pass the rules and are selected.${hsText}`, !!S.hs.error);
     render();
   } catch (e) { msg("Load failed: " + e.message, true); }
   finally { setBusy(false); render(); }
@@ -285,7 +285,7 @@ function visible() {
   const v = $("view").value;
   return S.sessions.filter(s => v === "all" || (v === "selected" && S.sel.get(s.id)) ||
     (v === "included" && s.included) || (v === "excluded" && !s.included) ||
-    (v === "dup" && S.dup[s.id]) || (v === "manual" && S.manual.has(s.id)));
+    (v === "dup" && s.in_hindsight) || (v === "manual" && S.manual.has(s.id)));
 }
 function render() {
   const tb = $("rows"); tb.replaceChildren();
@@ -298,10 +298,7 @@ function render() {
     for (const r of s.reasons) why.append(el("li", { text: r.message }));
     for (const n of s.notes) why.append(el("li", { class: "note", text: n }));
     if (S.manual.has(s.id)) why.append(el("li", { class: "note", text: S.sel.get(s.id) ? "ticked by hand (overrides the rules)" : "unticked by hand" }));
-    const dup = S.dup[s.id];
-    const dupCell = dup === "exact" ? tag("already there", "bad", "Hindsight already has a document for this session. Sending it again is refused.")
-      : dup === "possible" ? tag("maybe (old backfill same day)", "warn", "An old backfill, made before sessions were tagged with their full id, exists for a session started the same day. It may or may not be this one.")
-      : (S.dupChecked ? tag("not found", "info") : null);
+    const dupCell = hsIcon(s);
     const res = S.result[s.id];
     const resCell = !res ? null : res.pending ? tag("sending…", "info")
       : res.ok ? tag("sent", "ok") : res.skipped ? tag("not sent: already there", "warn", res.error)
@@ -310,30 +307,24 @@ function render() {
     const view = el("button", { class: "small", title: "Show exactly what would be sent for this session", onclick: () => preview([s.id]) }, "View");
     tb.append(el("tr", { class: (s.included ? "" : "excluded ") + (S.manual.has(s.id) ? "manual" : "") },
       el("td", {}, cb), el("td", { class: "date", text: s.started }), el("td", { class: "title", title: s.id, text: s.title }),
-      el("td", { class: "num", text: String(s.message_count) }), tools,
+      el("td", { class: "num", text: String(s.message_count) }), tools, el("td", { class: "icon" }, dupCell),
       el("td", {}, s.included ? tag("pass", "ok") : tag("skipped", "bad")),
-      el("td", { class: "why" }, why), el("td", {}, dupCell), el("td", {}, resCell), el("td", {}, view)));
+      el("td", { class: "why" }, why), el("td", {}, resCell), el("td", {}, view)));
   }
   const n = [...S.sel.values()].filter(Boolean).length;
   $("counts").textContent = S.sessions.length ? `${n} selected · ${S.manual.size} changed by hand` : "";
   $("chk-visible").checked = vis.length > 0 && vis.every(s => S.sel.get(s.id));
 }
+function hsIcon(s) {
+  const icon = (text, cls, title) => el("span", { class: `hs ${cls}`, text, title, "aria-label": title });
+  if (s.in_hindsight === "exact") return icon("✓", "ok", "Ingested or exists in Hindsight");
+  if (s.in_hindsight === "possible") return icon("?", "warn", "Not found by id, but an old backfill (made before sessions were tagged with their full id) exists for a session started the same day. It may be this one.");
+  if (S.hs.checked) return icon("✗", "bad", "Not found in Hindsight");
+  return icon("–", "info", S.hs.error || "Not checked: choose a bank");
+}
 const selectedIds = () => S.sessions.filter(s => S.sel.get(s.id)).map(s => s.id);
 
-// ---- duplicates / preview / send -----------------------------------------
-async function checkDups() {
-  if (!S.sessions.length) return msg("Load sessions first.", true);
-  if (needBank()) return;
-  setBusy(true); msg("Asking Hindsight which sessions it already has (read-only)…");
-  try {
-    const r = await api("/api/duplicates", { ids: S.sessions.map(s => s.id), ...ctx() });
-    S.dup = r.statuses; S.dupChecked = true;
-    for (const s of S.sessions) if (!S.manual.has(s.id)) S.sel.set(s.id, defaultSel(s));
-    const vals = Object.values(r.statuses);
-    msg(`Checked ${r.documents_scanned} Hindsight documents at ${r.checked_at}: ${vals.filter(v => v === "exact").length} sessions already there (unticked), ${vals.filter(v => v === "possible").length} maybe there (old same-day backfill).`);
-  } catch (e) { msg("Check failed: " + e.message, true); }
-  finally { setBusy(false); render(); }
-}
+// ---- preview / send -------------------------------------------------------
 async function preview(ids) {
   if (!ids.length) return msg("Nothing selected.", true);
   if (needBank()) return;
@@ -365,7 +356,7 @@ async function commit() {
   const ids = selectedIds();
   if (!ids.length) return msg("Nothing selected.", true);
   if (needBank()) return;
-  const warn = !S.dupChecked ? "\n\n(Hindsight will still refuse any session it already has.)" : "";
+  const warn = !S.hs.checked ? "\n\n(Hindsight wasn't checked; it will still refuse any session it already has.)" : "";
   if (!confirm(`Send ${ids.length} session(s) from Hermes profile “${S.profile}” to Hindsight bank “${S.bank}” at ${S.defaults.url}?${warn}`)) return;
   setBusy(true);
   let ok = 0, skipped = 0, fail = 0;
@@ -375,7 +366,12 @@ async function commit() {
     try {
       const r = await api("/api/commit", { id, ...ctx() });
       S.result[id] = r;
-      if (r.ok || r.skipped) { S.dup[id] = "exact"; S.sel.set(id, false); S.manual.delete(id); }
+      if (r.ok || r.skipped) {
+        // It's in Hindsight now: show it the way a fresh load would.
+        const s = S.byId.get(id); s.in_hindsight = "exact"; s.included = false;
+        if (!s.reasons.some(x => x.code === "in_hindsight")) s.reasons.unshift({ code: "in_hindsight", message: `already in Hindsight bank '${S.bank}'` });
+        S.sel.set(id, false); S.manual.delete(id);
+      }
       if (r.ok) ok++; else if (r.skipped) skipped++; else fail++;
     } catch (e) { S.result[id] = { ok: false, error: e.message }; fail++; }
   }
@@ -392,7 +388,6 @@ $("btn-none").onclick = () => { for (const s of S.sessions) setSel(s.id, false);
 $("btn-reset").onclick = () => { S.manual.clear(); for (const s of S.sessions) S.sel.set(s.id, defaultSel(s)); render(); };
 $("chk-visible").onchange = (ev) => { for (const s of visible()) setSel(s.id, ev.target.checked); render(); };
 $("view").onchange = render;
-$("btn-dups").onclick = checkDups;
 $("btn-dry").onclick = () => preview(selectedIds());
 $("btn-commit").onclick = commit;
 $("f-exclude").oninput = $("f-keep").oninput = updateRulesSummary;

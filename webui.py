@@ -140,14 +140,29 @@ def _fmt_ts(ts: float | None) -> str:
 
 def list_sessions(body: dict) -> dict:
     opts = _filter_options(body)
-    conn = core.connect_db(_profile(body).db)
+    prof = _profile(body)
+    bank = str(body.get("bank") or "").strip()
+    # Ask Hindsight which sessions the bank already has, so "already in
+    # Hindsight" is one of the rules. A failure here doesn't stop the list.
+    index, hs = None, {"bank": bank or None, "checked": False}
+    if bank:
+        try:
+            if bank not in core.list_banks(API_URL, API_KEY):
+                hs["error"] = f"bank {bank!r} does not exist in Hindsight"
+            else:
+                index = core.fetch_bank_session_index(API_URL, bank, API_KEY)
+                hs.update(checked=True, documents_scanned=index.documents_scanned,
+                          checked_at=datetime.now().strftime("%H:%M:%S"))
+        except Exception as exc:
+            hs["error"] = f"could not check Hindsight: {exc}"
+    conn = core.connect_db(prof.db)
     try:
         # min_turns=0: list short sessions too, with a reason, so they can be
         # selected manually. evaluate_session() applies the real threshold.
         sessions = core.get_db_sessions(conn, 0, opts.days, opts.until, False)
         out = []
         for s in sessions:
-            v = core.evaluate_session(conn, s, opts)
+            v = core.evaluate_session(conn, s, opts, index, bank or None)
             out.append({
                 "id": s["id"],
                 "title": core.session_title(s) or s["id"],
@@ -159,11 +174,13 @@ def list_sessions(body: dict) -> dict:
                 "reasons": [{"code": r.code, "message": r.message} for r in v.reasons],
                 "notes": v.notes,
                 "text_chars": len(v.text) if v.text else 0,
+                "in_hindsight": v.in_hindsight,
             })
     finally:
         conn.close()
-    return {"sessions": out, "count": len(out),
-            "included": sum(1 for s in out if s["included"])}
+    return {"sessions": out, "count": len(out), "hindsight": hs,
+            "included": sum(1 for s in out if s["included"]),
+            "in_hindsight": sum(1 for s in out if s["in_hindsight"] == "exact")}
 
 
 def _payload_for(conn, session_id: str, bank: str) -> dict:
@@ -246,14 +263,6 @@ def _error_text(exc: Exception) -> str:
     return str(exc) or type(exc).__name__
 
 
-def duplicates(body: dict) -> dict:
-    ids = _ids(body)
-    idx = core.fetch_bank_session_index(API_URL, _bank(body), API_KEY)
-    statuses = {sid: st for sid in ids if (st := core.duplicate_status(sid, idx))}
-    return {"documents_scanned": idx.documents_scanned, "statuses": statuses,
-            "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-
 def status(query: dict) -> dict:
     """Connection status for the chosen profile's DB and bank."""
     prof = _profile(query)
@@ -289,7 +298,7 @@ def defaults(_query: dict) -> dict:
 
 ROUTES_GET = {"/api/status": status, "/api/defaults": defaults, "/api/profiles": profiles}
 ROUTES_POST = {"/api/sessions": list_sessions, "/api/preview": preview,
-               "/api/commit": commit_one, "/api/duplicates": duplicates}
+               "/api/commit": commit_one}
 
 
 class Handler(BaseHTTPRequestHandler):
