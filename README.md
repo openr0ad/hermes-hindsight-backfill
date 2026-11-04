@@ -14,15 +14,17 @@ Hindsight only captures sessions going forward from when it was set up. This scr
 
 ## Filter pipeline
 
-Sessions pass through a four-stage filter before being retained:
+Sessions pass through a five-stage filter before being retained:
 
-1. **Date + turn filter** — must be within `--days` window and have at least
-   `--min-turns` exchanges
+1. **Date + turn filter** — must be within `--days` window (and on/before
+   `--until` if given) and have at least `--min-turns` exchanges
 2. **Exclusion patterns** — sessions whose title matches any pattern in
    `DEFAULT_EXCLUDE_PATTERNS` (or `--exclude-pattern`) are skipped
-3. **Substantive check** — must have at least one tool call or a code block;
+3. **Excluded tools** — sessions that called any tool in `DEFAULT_EXCLUDE_TOOLS`
+   (or `--exclude-tool`) are skipped — see below
+4. **Substantive check** — must have at least one tool call or a code block;
    pure chat sessions are skipped
-4. **Length check** — formatted text must be at least 200 characters
+5. **Length check** — formatted text must be at least 200 characters
 
 A state file (`~/.hermes/.backfill_state.json`) tracks retained session IDs
 so re-runs skip already-processed sessions automatically. Pass
@@ -39,6 +41,35 @@ sessions with a populated key).
 
 What gets retained: technical sessions with real back-and-forth — debugging,
 config changes, code, automation work, etc.
+
+### Excluding meal logs (and other write-only sessions)
+
+Title regexes are a blunt tool: they cannot tell *"Log meals for today"* (a
+write-only entry you don't want in memory) from *"Review peanut logs after
+server closet outage"* (real technical work). Matching on the tools a session
+actually called is precise instead. `log_meal` — the healthlog meal tracker —
+is excluded by default, so meal-logging sessions never reach Hindsight:
+
+```bash
+# add another tool to the exclusion set (repeatable)
+python3 backfill_hindsight.py --days 90 --exclude-tool log_peptide
+
+# keep everything, including meal logs
+python3 backfill_hindsight.py --days 90 --no-exclude-tools
+```
+
+The title patterns in `DEFAULT_EXCLUDE_PATTERNS` remain as a fallback for older
+sessions that logged meals without going through the plugin.
+
+**Engineering work wins.** Any title matching `DEFAULT_KEEP_PATTERNS` (`fix`,
+`rebuild`, `debug`, `prompt`, `protocol`, `integration`, `.csv`, `error`,
+`script`, `bug`, `skill`, `schema`, `cron`) is kept regardless of both filters —
+so *"Rebuilding meals.csv after write error"* and *"New nutrition logging
+integration protocol"* are retained as the technical sessions they are, while
+*"Log meals for today"* is dropped. Extend with `--keep-pattern`.
+
+A session that logs a meal *and* does technical work is skipped unless its title
+matches a keep pattern — `--no-exclude-tools` is the broader escape hatch.
 
 ## Prerequisites
 
@@ -117,6 +148,9 @@ python3 backfill_hindsight.py --no-skip-tagged
 | `--state-file`      | `~/.hermes/.backfill_state.json` | Custom path for state ledger                                   |
 | `--min-tool-calls`  | `1`                              | Tool call threshold for "substantive"                          |
 | `--exclude-pattern` | —                                | Regex to skip sessions by title (repeatable, case-insensitive) |
+| `--keep-pattern`    | —                                | Regex that forces a title to be kept, overriding both exclusions |
+| `--exclude-tool`    | `log_meal`                       | Skip sessions that called this tool (repeatable)               |
+| `--no-exclude-tools`| off                              | Disable tool-based exclusion entirely                          |
 
 ## Tuning exclusion patterns
 

@@ -44,10 +44,47 @@ DEFAULT_EXCLUDE_PATTERNS = [
     r"\bbreakfast\b",
     r"\blunch\b",
     r"\bdinner\b",
+    r"\bsnacks?\b",
     r"\bmacros?\b",
-    r"\blogge?d?\b",
+    r"\bcalories\b",
     r"\bnutrition\b",
     r"\bgreeting\b",
+    # Meal-log vocabulary. This only sees the session TITLE, so it is a blunt
+    # instrument — a technical session that merely mentions "logs" (e.g.
+    # "Review peanut logs") must NOT match. DEFAULT_EXCLUDE_TOOLS is the precise
+    # signal; these patterns are the fallback for older sessions that logged
+    # meals without going through the healthlog plugin.
+    r"\bmeals?\b",
+    r"\bmeal log(?:ging|ged)?\b",
+    r"\bfood (?:log|intake|tracker|diary)\b",
+    r"\bintake\b",
+]
+
+# Tools whose presence in a session marks it as a write-only log entry rather
+# than technical work worth remembering. Matched against messages.tool_name,
+# which is far more reliable than title heuristics. healthlog's log_meal is the
+# meal tracker; add more with --exclude-tool (e.g. log_peptide).
+DEFAULT_EXCLUDE_TOOLS = ["log_meal"]
+
+# Titles that look like engineering work are never excluded, even if they
+# mention food or logging. "Rebuilding meals.csv after write error" and
+# "Improving AI meal logging prompts" are sessions about the meal-logging
+# *system* — real technical work — not meal entries. Checked before the
+# exclusion patterns; --keep-pattern adds to this list.
+DEFAULT_KEEP_PATTERNS = [
+    r"\bfix\b",
+    r"\brebuil",
+    r"\bdebug",
+    r"\bprompt",
+    r"\bprotocol\b",
+    r"\bintegration\b",
+    r"\.csv\b",
+    r"\berror\b",
+    r"\bscript",
+    r"\bbug\b",
+    r"\bskill\b",
+    r"\bschema\b",
+    r"\bcron\b",
 ]
 
 
@@ -144,12 +181,44 @@ def get_session_messages(db_path: Path, session_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_session_tools(db_path: Path, session_id: str) -> set[str]:
+    """Distinct tool names invoked in a session.
+
+    Deliberately separate from get_session_messages: that only returns
+    user/assistant/system rows, while tool invocations are recorded as
+    role='tool' rows carrying tool_name.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT tool_name FROM messages "
+            "WHERE session_id = ? AND tool_name IS NOT NULL",
+            (session_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {r[0] for r in rows}
+
+
 # ---------------------------------------------------------------------------
 # Filtering helpers
 # ---------------------------------------------------------------------------
 
 def matches_exclusion(session: dict, patterns: list[re.Pattern]) -> str | None:
     title = session.get("title") or session.get("display_name") or ""
+    for pat in patterns:
+        if pat.search(title):
+            return pat.pattern
+    return None
+
+
+def session_title(session: dict) -> str:
+    return session.get("title") or session.get("display_name") or ""
+
+
+def matches_keep(session: dict, patterns: list[re.Pattern]) -> str | None:
+    """Engineering-looking titles that override the exclusion patterns."""
+    title = session_title(session)
     for pat in patterns:
         if pat.search(title):
             return pat.pattern
@@ -255,6 +324,14 @@ def main():
     ap.add_argument("--state-file", type=Path, default=None, help="Ledger of completed session IDs (default: <db-dir>/.backfill_state.json)")
     ap.add_argument("--min-tool-calls", type=int, default=1, help="Min tool calls to count as substantive")
     ap.add_argument("--exclude-pattern", action="append", default=[], help="Regex to exclude by title (repeatable)")
+    ap.add_argument("--keep-pattern", action="append", default=[],
+                    help="Regex that forces a title to be kept, overriding both the exclusion "
+                         "patterns and tool exclusion (repeatable)")
+    ap.add_argument("--exclude-tool", action="append", default=list(DEFAULT_EXCLUDE_TOOLS),
+                    help="Exclude sessions that called this tool (repeatable; default: %(default)s). "
+                         "Matched against messages.tool_name — precise, unlike title regexes.")
+    ap.add_argument("--no-exclude-tools", action="store_true",
+                    help="Disable tool-based exclusion entirely (keeps every session, including meal logs)")
     args = ap.parse_args()
 
     if not args.db.exists():
@@ -268,12 +345,18 @@ def main():
     exclude_patterns = [
         re.compile(p, re.IGNORECASE) for p in DEFAULT_EXCLUDE_PATTERNS + args.exclude_pattern
     ]
+    keep_patterns = [
+        re.compile(p, re.IGNORECASE) for p in DEFAULT_KEEP_PATTERNS + args.keep_pattern
+    ]
+    exclude_tools = set() if args.no_exclude_tools else set(args.exclude_tool)
 
     print(f"DB: {args.db}")
     print(f"Min turns (exchanges): {args.min_turns}, Days: {args.days}, Dry run: {args.dry_run}")
     if args.until is not None:
         print(f"Until (inclusive): {datetime.fromtimestamp(args.until).strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Hindsight URL: {args.url}")
+    if exclude_tools:
+        print(f"Excluding sessions that called: {', '.join(sorted(exclude_tools))}")
     print(f"State file: {state_path} ({len(done)} already retained)")
 
     sessions = get_db_sessions(args.db, args.min_turns, args.days, args.until,
@@ -307,7 +390,8 @@ def main():
             skipped += 1
             continue
 
-        exc_match = matches_exclusion(s, exclude_patterns)
+        keep_match = matches_keep(s, keep_patterns)
+        exc_match = None if keep_match else matches_exclusion(s, exclude_patterns)
         if exc_match:
             print(f"skip (matches exclusion: {exc_match!r})")
             skipped += 1
@@ -318,6 +402,13 @@ def main():
             print("skip (no messages)")
             skipped += 1
             continue
+
+        if exclude_tools and not keep_match:
+            used = get_session_tools(args.db, sid) & exclude_tools
+            if used:
+                print(f"skip (used excluded tool: {', '.join(sorted(used))})")
+                skipped += 1
+                continue
 
         if not is_substantive(s, msgs, args.min_tool_calls):
             print("skip (no tool calls or code — chat only)")
