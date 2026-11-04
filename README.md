@@ -68,8 +68,15 @@ python3 backfill_hindsight.py --dry-run --show-text --limit 3
 # Real run: last 90 days, min 6 turns
 python3 backfill_hindsight.py --days 90 --min-turns 6
 
+# Target a specific window (e.g. an ingestion gap): Oct 6 through Oct 31
+python3 backfill_hindsight.py --days 31 --until 2026-10-31 --min-turns 6
+
 # Custom Hindsight server and bank
 python3 backfill_hindsight.py --url http://my-server:8888 --bank-id my-bank
+
+# Hindsight on another host (Docker/VM) — set once instead of passing --url
+export HINDSIGHT_API_URL=http://10.0.0.8:8888
+python3 backfill_hindsight.py --days 90
 
 # Exclude sessions by title pattern (repeatable)
 python3 backfill_hindsight.py --days 90 \
@@ -88,10 +95,11 @@ python3 backfill_hindsight.py --no-skip-tagged
 | Flag                | Default                          | Description                                                    |
 | ------------------- | -------------------------------- | -------------------------------------------------------------- |
 | `--db`              | `~/.hermes/state.db`             | Path to Hermes session database                                |
-| `--url`             | `http://localhost:8888`          | Hindsight API base URL                                         |
+| `--url`             | `$HINDSIGHT_API_URL` → `http://localhost:8888` | Hindsight API base URL (Hindsight is often on another host) |
 | `--bank-id`         | `hermes`                         | Hindsight memory bank ID                                       |
 | `--min-turns`       | `6`                              | Minimum exchanges (user+assistant pairs) per session           |
 | `--days`            | `90`                             | How far back to look                                           |
+| `--until`           | none                             | Upper bound: only sessions started on/before this date (`YYYY-MM-DD` = end of day, inclusive) |
 | `--limit`           | `0` (all)                        | Cap sessions processed                                         |
 | `--dry-run`         | off                              | Preview without writing to Hindsight                           |
 | `--show-text`       | off                              | Print formatted text preview (dry-run only)                    |
@@ -129,7 +137,7 @@ Use the resulting date to set `--days` appropriately for a full backfill.
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.11+ (required by `hindsight-all`)
 
 ## License
 

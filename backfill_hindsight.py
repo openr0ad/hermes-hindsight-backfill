@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -30,6 +31,11 @@ except ImportError:
 
 DEFAULT_DB = Path.home() / ".hermes" / "state.db"
 DEFAULT_BANK_ID = "hermes"
+# Hindsight is not necessarily local to the machine running this script: it
+# commonly runs on another host (Docker/VM). Resolve the endpoint from the same
+# env var the Hindsight plugin uses, so no host-specific address is baked into
+# source. Set HINDSIGHT_API_URL=http://<host>:8888 in the environment.
+DEFAULT_API_URL = os.environ.get("HINDSIGHT_API_URL") or "http://localhost:8888"
 TAG = "backfill"
 
 DEFAULT_EXCLUDE_PATTERNS = [
@@ -66,13 +72,34 @@ def save_state(state_path: Path, done: set[str]) -> None:
 # Database helpers
 # ---------------------------------------------------------------------------
 
-def get_db_sessions(db_path: Path, min_turns: int, days: int) -> list[dict]:
+def parse_date_arg(value: str) -> float:
+    """Parse a --until value into a unix timestamp.
+
+    Accepts YYYY-MM-DD (interpreted as *end* of that local day, inclusive) or
+    an ISO-ish datetime (YYYY-MM-DD[ T]HH:MM[:SS]).
+    """
+    value = value.strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+        if fmt == "%Y-%m-%d":
+            dt = dt.replace(hour=23, minute=59, second=59)
+        return dt.timestamp()
+    raise argparse.ArgumentTypeError(
+        f"unrecognized date {value!r} — use YYYY-MM-DD or 'YYYY-MM-DD HH:MM[:SS]'"
+    )
+
+
+def get_db_sessions(db_path: Path, min_turns: int, days: int,
+                    until: float | None = None) -> list[dict]:
     min_messages = max(min_turns * 2, min_turns)
     cutoff = datetime.now().timestamp() - (days * 86400)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """
+    sql = """
         SELECT id, title, started_at, message_count, tool_call_count,
                display_name, profile_name
         FROM sessions
@@ -80,10 +107,13 @@ def get_db_sessions(db_path: Path, min_turns: int, days: int) -> list[dict]:
           AND message_count >= ?
           AND started_at >= ?
           AND session_key IS NOT NULL
-        ORDER BY started_at DESC
-        """,
-        (min_messages, cutoff),
-    ).fetchall()
+    """
+    params: list = [min_messages, cutoff]
+    if until is not None:
+        sql += " AND started_at <= ?"
+        params.append(until)
+    sql += " ORDER BY started_at DESC"
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -200,10 +230,13 @@ def retain_session(client: Hindsight, session_id: str, text: str,
 def main():
     ap = argparse.ArgumentParser(description="Backfill Hermes sessions into Hindsight")
     ap.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to Hermes state.db")
-    ap.add_argument("--url", type=str, default="http://localhost:8888", help="Hindsight API base URL")
+    ap.add_argument("--url", type=str, default=DEFAULT_API_URL, help="Hindsight API base URL (default: $HINDSIGHT_API_URL or http://localhost:8888)")
     ap.add_argument("--bank-id", type=str, default=DEFAULT_BANK_ID, help="Hindsight memory bank ID")
     ap.add_argument("--min-turns", type=int, default=6, help="Minimum exchanges (user+assistant pairs)")
     ap.add_argument("--days", type=int, default=90, help="Look back N days")
+    ap.add_argument("--until", type=parse_date_arg, default=None,
+                    help="Only include sessions started on/before this date (YYYY-MM-DD or 'YYYY-MM-DD HH:MM'). "
+                         "Upper bound — lets you target a specific window with --days.")
     ap.add_argument("--limit", type=int, default=0, help="Max sessions to process (0 = all)")
     ap.add_argument("--dry-run", action="store_true", help="Preview without writing to Hindsight")
     ap.add_argument("--show-text", action="store_true", help="Print formatted text preview (dry-run only)")
@@ -227,9 +260,12 @@ def main():
 
     print(f"DB: {args.db}")
     print(f"Min turns (exchanges): {args.min_turns}, Days: {args.days}, Dry run: {args.dry_run}")
+    if args.until is not None:
+        print(f"Until (inclusive): {datetime.fromtimestamp(args.until).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Hindsight URL: {args.url}")
     print(f"State file: {state_path} ({len(done)} already retained)")
 
-    sessions = get_db_sessions(args.db, args.min_turns, args.days)
+    sessions = get_db_sessions(args.db, args.min_turns, args.days, args.until)
     print(f"Found {len(sessions)} sessions passing turn/date filter")
 
     if args.limit:
