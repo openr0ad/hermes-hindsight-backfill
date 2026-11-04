@@ -28,6 +28,15 @@ A state file (`~/.hermes/.backfill_state.json`) tracks retained session IDs
 so re-runs skip already-processed sessions automatically. Pass
 `--no-skip-tagged` to reprocess everything.
 
+### Sessions with a NULL `session_key`
+
+By default sessions are included **even if `session_key` is NULL**. That column
+is only populated for sessions that ended cleanly, so excluding NULLs silently
+drops a large share of otherwise-good sessions — anything cut short by a crash,
+power loss, or gateway restart. On a real database that was ~79% of all rows.
+Pass `--exclude-missing-session-key` for the old, stricter behaviour (only
+sessions with a populated key).
+
 What gets retained: technical sessions with real back-and-forth — debugging,
 config changes, code, automation work, etc.
 
@@ -103,7 +112,8 @@ python3 backfill_hindsight.py --no-skip-tagged
 | `--limit`           | `0` (all)                        | Cap sessions processed                                         |
 | `--dry-run`         | off                              | Preview without writing to Hindsight                           |
 | `--show-text`       | off                              | Print formatted text preview (dry-run only)                    |
-| `--no-skip-tagged`  | off                              | Reprocess already-retained sessions                            |
+| `--no-skip-tagged`  | off                              | Reprocess already-retained sessions                             |
+| `--exclude-missing-session-key` | off                  | Only include sessions with a populated `session_key` (see note) |
 | `--state-file`      | `~/.hermes/.backfill_state.json` | Custom path for state ledger                                   |
 | `--min-tool-calls`  | `1`                              | Tool call threshold for "substantive"                          |
 | `--exclude-pattern` | —                                | Regex to skip sessions by title (repeatable, case-insensitive) |

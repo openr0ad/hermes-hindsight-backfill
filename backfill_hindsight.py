@@ -94,7 +94,8 @@ def parse_date_arg(value: str) -> float:
 
 
 def get_db_sessions(db_path: Path, min_turns: int, days: int,
-                    until: float | None = None) -> list[dict]:
+                    until: float | None = None,
+                    exclude_missing_session_key: bool = False) -> list[dict]:
     min_messages = max(min_turns * 2, min_turns)
     cutoff = datetime.now().timestamp() - (days * 86400)
     conn = sqlite3.connect(db_path)
@@ -106,9 +107,15 @@ def get_db_sessions(db_path: Path, min_turns: int, days: int,
         WHERE archived = 0
           AND message_count >= ?
           AND started_at >= ?
-          AND session_key IS NOT NULL
     """
     params: list = [min_messages, cutoff]
+    # By default NULL session_key rows ARE included. session_key is only
+    # populated for sessions that ended cleanly, so excluding NULLs silently
+    # drops a large share of otherwise-good sessions (e.g. anything cut short
+    # by a crash or gateway restart). Opt in to the stricter behaviour with
+    # --exclude-missing-session-key.
+    if exclude_missing_session_key:
+        sql += " AND session_key IS NOT NULL"
     if until is not None:
         sql += " AND started_at <= ?"
         params.append(until)
@@ -241,6 +248,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Preview without writing to Hindsight")
     ap.add_argument("--show-text", action="store_true", help="Print formatted text preview (dry-run only)")
     ap.add_argument("--no-skip-tagged", action="store_true", help="Re-process sessions already retained in a prior run")
+    ap.add_argument("--exclude-missing-session-key", action="store_true",
+                    help="Only include sessions with a populated session_key. Default is to INCLUDE "
+                         "sessions with a NULL session_key (they are usually good sessions that didn't "
+                         "end cleanly) — pass this flag for the old, stricter behaviour.")
     ap.add_argument("--state-file", type=Path, default=None, help="Ledger of completed session IDs (default: <db-dir>/.backfill_state.json)")
     ap.add_argument("--min-tool-calls", type=int, default=1, help="Min tool calls to count as substantive")
     ap.add_argument("--exclude-pattern", action="append", default=[], help="Regex to exclude by title (repeatable)")
@@ -265,7 +276,8 @@ def main():
     print(f"Hindsight URL: {args.url}")
     print(f"State file: {state_path} ({len(done)} already retained)")
 
-    sessions = get_db_sessions(args.db, args.min_turns, args.days, args.until)
+    sessions = get_db_sessions(args.db, args.min_turns, args.days, args.until,
+                               args.exclude_missing_session_key)
     print(f"Found {len(sessions)} sessions passing turn/date filter")
 
     if args.limit:
