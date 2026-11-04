@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes → Hindsight backfill</title>
+<style>
+  :root { --fg:#1d2228; --muted:#69737d; --line:#dde1e5; --bg:#f6f7f8; --card:#fff;
+          --ok:#1d7a46; --bad:#b3261e; --warn:#9a6700; --accent:#2457c5; --manual:#f2c94c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e3e6e9; --muted:#9aa3ab; --line:#353b41; --bg:#16191c; --card:#1e2226;
+            --ok:#4cc38a; --bad:#f07167; --warn:#e3b341; --accent:#7aa2ff; --manual:#b8932a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--fg); background:var(--bg); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:10px 16px; background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  .pill { display:inline-flex; gap:6px; align-items:center; padding:3px 10px; border-radius:999px; border:1px solid var(--line); font-size:13px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  main { padding:12px 16px; }
+  section.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px; }
+  .filters { display:flex; flex-wrap:wrap; gap:10px 16px; align-items:flex-end; }
+  .filters label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); gap:2px; }
+  .filters label.inline { flex-direction:row; align-items:center; gap:6px; }
+  input, textarea, select, button { font:inherit; color:inherit; }
+  input[type=number] { width:70px; } input[type=text], textarea { min-width:180px; }
+  input, textarea, select { background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:3px 6px; }
+  textarea { height:48px; resize:vertical; font-family:ui-monospace, monospace; font-size:12px; }
+  button { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:5px 11px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { background:var(--bad); color:#fff; border-color:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .toolbar .sep { width:1px; height:22px; background:var(--line); margin:0 4px; }
+  .muted { color:var(--muted); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { position:sticky; top:0; background:var(--card); font-weight:600; z-index:1; }
+  tr.manual td:first-child { box-shadow: inset 4px 0 0 var(--manual); }
+  tr.excluded td.title { color:var(--muted); }
+  td.date { white-space:nowrap; }
+  td.why { min-width:220px; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:12px; border:1px solid currentColor; margin:1px 2px 1px 0; white-space:nowrap; }
+  .tag.ok { color:var(--ok); } .tag.bad { color:var(--bad); } .tag.warn { color:var(--warn); } .tag.info { color:var(--muted); }
+  ul.reasons { margin:0; padding-left:16px; } ul.reasons li.note { color:var(--muted); list-style:circle; }
+  .tablewrap { max-height:62vh; overflow:auto; }
+  details { border:1px solid var(--line); border-radius:6px; padding:4px 8px; margin:4px 0; }
+  summary { cursor:pointer; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); padding:8px; border-radius:6px; font-size:12px; max-height:340px; overflow:auto; }
+  #msg { min-height:1.4em; }
+  .err { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hermes → Hindsight backfill</h1>
+  <span class="pill" id="st-db"><span class="dot"></span><span>Hermes DB: checking…</span></span>
+  <span class="pill" id="st-hs"><span class="dot"></span><span>Hindsight: checking…</span></span>
+  <button id="btn-status" title="Re-check connections">↻</button>
+</header>
+<main>
+  <section class="card">
+    <div class="filters">
+      <label>Days back <input type="number" id="f-days" min="1"></label>
+      <label>Until (optional) <input type="date" id="f-until"></label>
+      <label>Min turns <input type="number" id="f-min-turns" min="0"></label>
+      <label>Min tool calls <input type="number" id="f-min-tools" min="0"></label>
+      <label>Excluded tools (comma) <input type="text" id="f-tools"></label>
+      <label>Extra exclude regexes (one per line) <textarea id="f-exclude"></textarea></label>
+      <label>Extra keep regexes (one per line) <textarea id="f-keep"></textarea></label>
+      <label class="inline"><input type="checkbox" id="f-missing-key"> Require session_key</label>
+      <button class="primary" id="btn-load">Load sessions</button>
+    </div>
+    <details style="margin-top:8px"><summary class="muted">Built-in title patterns</summary>
+      <div class="muted" id="builtin-patterns"></div></details>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <button id="btn-all">Select all</button>
+      <button id="btn-none">Select none</button>
+      <button id="btn-reset" title="Reset selection to what the filters (and duplicate check) decide">Reset to filters</button>
+      <span class="sep"></span>
+      <label class="muted">Show <select id="view">
+        <option value="all">All</option><option value="selected">Selected</option>
+        <option value="included">Passed filters</option><option value="excluded">Excluded by filters</option>
+        <option value="dup">Duplicates</option><option value="manual">Manual overrides</option>
+      </select></label>
+      <span class="sep"></span>
+      <button id="btn-dups">Check duplicates</button>
+      <button id="btn-dry">Dry run</button>
+      <button class="danger" id="btn-commit">Commit selected</button>
+      <span class="muted" id="counts"></span>
+    </div>
+    <div id="msg" class="muted"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th><input type="checkbox" id="chk-visible" title="Toggle visible rows"></th>
+          <th>Started</th><th>Title</th><th class="num">Msgs</th><th class="num">Tools</th>
+          <th>Filters</th><th>Why</th><th>In Hindsight</th><th>Result</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="9" class="muted">Load sessions to begin.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="dry-card" hidden>
+    <h3 style="margin:0 0 4px">Dry run — exactly what would be sent</h3>
+    <div class="muted" id="dry-summary"></div>
+    <div id="dry-items"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const S = { sessions: [], byId: new Map(), sel: new Map(), manual: new Set(), dup: {}, result: {}, busy: false, defaults: null };
+
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+}
+const tag = (text, kind) => el("span", { class: `tag ${kind}`, text });
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  let data; try { data = await r.json(); } catch { data = { error: `HTTP ${r.status}` }; }
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+function msg(text, isErr = false) { $("msg").textContent = text; $("msg").className = isErr ? "err" : "muted"; }
+function setBusy(b) {
+  S.busy = b;
+  for (const id of ["btn-load", "btn-dups", "btn-dry", "btn-commit", "btn-all", "btn-none", "btn-reset"]) $(id).disabled = b;
+}
+
+// ---- status ---------------------------------------------------------------
+function pill(id, ok, text, title) {
+  const p = $(id); p.querySelector(".dot").className = "dot " + (ok ? "ok" : "bad");
+  p.querySelector("span:last-child").textContent = text; p.title = title || "";
+}
+async function loadStatus() {
+  pill("st-db", false, "Hermes DB: checking…"); pill("st-hs", false, "Hindsight: checking…");
+  try {
+    const s = await api("/api/status");
+    const d = s.db, h = s.hindsight;
+    pill("st-db", d.ok, d.ok ? `Hermes DB: ${d.sessions} sessions` : `Hermes DB: ${d.error}`, d.path);
+    pill("st-hs", h.ok, h.ok ? `Hindsight ${h.version}: bank “${h.bank}” (${h.documents} docs)` : `Hindsight: ${h.error}`, h.url);
+  } catch (e) { pill("st-db", false, "status failed: " + e.message); }
+}
+
+// ---- filters --------------------------------------------------------------
+const lines = (s) => s.split("\n").map(x => x.trim()).filter(Boolean);
+function filterBody() {
+  return {
+    days: +$("f-days").value, until: $("f-until").value || null,
+    min_turns: +$("f-min-turns").value, min_tool_calls: +$("f-min-tools").value,
+    exclude_tools: $("f-tools").value.split(",").map(x => x.trim()).filter(Boolean),
+    extra_exclude_patterns: lines($("f-exclude").value), extra_keep_patterns: lines($("f-keep").value),
+    exclude_missing_session_key: $("f-missing-key").checked,
+  };
+}
+async function loadDefaults() {
+  const d = S.defaults = await api("/api/defaults");
+  $("f-days").value = d.days; $("f-min-turns").value = d.min_turns; $("f-min-tools").value = d.min_tool_calls;
+  $("f-tools").value = d.exclude_tools.join(", ");
+  $("builtin-patterns").textContent = `Exclude: ${d.default_exclude_patterns.join("  ·  ")}\nKeep (overrides exclusions): ${d.default_keep_patterns.join("  ·  ")}`;
+  $("builtin-patterns").style.whiteSpace = "pre-wrap";
+}
+
+// ---- sessions -------------------------------------------------------------
+const defaultSel = (s) => s.included && S.dup[s.id] !== "exact" && !(S.result[s.id] && S.result[s.id].ok);
+async function loadSessions() {
+  setBusy(true); msg("Loading and evaluating sessions…");
+  try {
+    const r = await api("/api/sessions", filterBody());
+    S.sessions = r.sessions; S.byId = new Map(r.sessions.map(s => [s.id, s]));
+    S.sel = new Map(); S.manual = new Set(); S.dup = {}; S.result = {};
+    for (const s of S.sessions) S.sel.set(s.id, defaultSel(s));
+    $("dry-card").hidden = true;
+    msg(`${r.count} sessions in window, ${r.included} pass the filters.`);
+    render();
+  } catch (e) { msg("Load failed: " + e.message, true); }
+  finally { setBusy(false); }
+}
+function setSel(id, on, manual = true) {
+  S.sel.set(id, on);
+  const s = S.byId.get(id);
+  if (manual && on !== defaultSel(s)) S.manual.add(id); else S.manual.delete(id);
+}
+function visible() {
+  const v = $("view").value;
+  return S.sessions.filter(s => v === "all" || (v === "selected" && S.sel.get(s.id)) ||
+    (v === "included" && s.included) || (v === "excluded" && !s.included) ||
+    (v === "dup" && S.dup[s.id]) || (v === "manual" && S.manual.has(s.id)));
+}
+function render() {
+  const tb = $("rows"); tb.replaceChildren();
+  const vis = visible();
+  if (!vis.length) tb.append(el("tr", {}, el("td", { colspan: 9, class: "muted", text: S.sessions.length ? "No rows in this view." : "No sessions in this window." })));
+  for (const s of vis) {
+    const cb = el("input", { type: "checkbox", onchange: (ev) => { setSel(s.id, ev.target.checked); render(); } });
+    cb.checked = !!S.sel.get(s.id); cb.disabled = S.busy;
+    const why = el("ul", { class: "reasons" });
+    for (const r of s.reasons) why.append(el("li", { text: r.message }));
+    for (const n of s.notes) why.append(el("li", { class: "note", text: n }));
+    if (S.manual.has(s.id)) why.append(el("li", { class: "note", text: S.sel.get(s.id) ? "manually selected (overrides filters)" : "manually deselected" }));
+    const dup = S.dup[s.id];
+    const dupCell = dup === "exact" ? tag("already in Hindsight", "bad")
+      : dup === "possible" ? el("span", { title: "An old backfill (pre session-id fix) exists for a session started the same day. It may or may not be this one." }, tag("possible (same-day old backfill)", "warn"))
+      : (S.dupChecked ? tag("not found", "info") : null);
+    const res = S.result[s.id];
+    const resCell = !res ? null : res.pending ? tag("sending…", "info")
+      : res.ok ? tag("retained", "ok") : el("span", { class: "err", text: "failed: " + res.error });
+    const tools = el("td", { class: "num", title: s.tools.join(", "), text: String(s.tool_call_count) });
+    tb.append(el("tr", { class: (s.included ? "" : "excluded ") + (S.manual.has(s.id) ? "manual" : "") },
+      el("td", {}, cb), el("td", { class: "date", text: s.started }), el("td", { class: "title", title: s.id, text: s.title }),
+      el("td", { class: "num", text: String(s.message_count) }), tools,
+      el("td", {}, s.included ? tag("pass", "ok") : tag("excluded", "bad")),
+      el("td", { class: "why" }, why), el("td", {}, dupCell), el("td", {}, resCell)));
+  }
+  const n = [...S.sel.values()].filter(Boolean).length;
+  $("counts").textContent = S.sessions.length ? `${n} selected · ${S.manual.size} manual override(s)` : "";
+  $("chk-visible").checked = vis.length > 0 && vis.every(s => S.sel.get(s.id));
+}
+const selectedIds = () => S.sessions.filter(s => S.sel.get(s.id)).map(s => s.id);
+
+// ---- duplicates / dry run / commit ---------------------------------------
+async function checkDups() {
+  if (!S.sessions.length) return msg("Load sessions first.", true);
+  setBusy(true); msg("Listing documents in Hindsight (read-only)…");
+  try {
+    const r = await api("/api/duplicates", { ids: S.sessions.map(s => s.id) });
+    S.dup = r.statuses; S.dupChecked = true;
+    // Exact duplicates are deselected unless the user chose otherwise.
+    for (const s of S.sessions) if (!S.manual.has(s.id)) S.sel.set(s.id, defaultSel(s));
+    const vals = Object.values(r.statuses);
+    msg(`Scanned ${r.documents_scanned} Hindsight documents at ${r.checked_at}: ${vals.filter(v => v === "exact").length} already present (deselected), ${vals.filter(v => v === "possible").length} possible same-day old backfills.`);
+  } catch (e) { msg("Duplicate check failed: " + e.message, true); }
+  finally { setBusy(false); render(); }
+}
+async function dryRun() {
+  const ids = selectedIds();
+  if (!ids.length) return msg("Nothing selected.", true);
+  setBusy(true); msg("Building payloads (no Hindsight calls)…");
+  try {
+    const r = await api("/api/preview", { ids });
+    const box = $("dry-items"); box.replaceChildren();
+    let chars = 0, ok = 0;
+    for (const it of r.items) {
+      const s = S.byId.get(it.id);
+      if (!it.ok) { box.append(el("div", { class: "err", text: `${s ? s.title : it.id}: ${it.error}` })); continue; }
+      ok++; const p = it.payload; chars += p.content.length;
+      const { content, ...meta } = p;
+      box.append(el("details", {},
+        el("summary", { text: `${s ? s.title : it.id} — ${p.document_id} — ${content.length.toLocaleString()} chars` }),
+        el("div", { class: "muted", text: "Request fields:" }), el("pre", { text: JSON.stringify(meta, null, 2) }),
+        el("div", { class: "muted", text: "content:" }), el("pre", { text: content })));
+    }
+    $("dry-summary").textContent = `${ok} retain call(s) to ${r.url}, ${chars.toLocaleString()} characters total. No write calls were made.`;
+    $("dry-card").hidden = false; $("dry-card").scrollIntoView({ behavior: "smooth" });
+    msg(`Dry run built ${ok} payload(s).`);
+  } catch (e) { msg("Dry run failed: " + e.message, true); }
+  finally { setBusy(false); render(); }
+}
+async function commit() {
+  const ids = selectedIds();
+  if (!ids.length) return msg("Nothing selected.", true);
+  const dupSel = ids.filter(id => S.dup[id] === "exact").length;
+  const warn = !S.dupChecked ? "\n\nDuplicates have NOT been checked." : dupSel ? `\n\n${dupSel} of them are already in Hindsight.` : "";
+  if (!confirm(`Retain ${ids.length} session(s) into bank “${S.defaults.bank}” at ${S.defaults.url}?${warn}`)) return;
+  setBusy(true);
+  let ok = 0, fail = 0;
+  for (const [i, id] of ids.entries()) {
+    S.result[id] = { pending: true }; render();
+    msg(`Committing ${i + 1}/${ids.length}…`);
+    try {
+      const r = await api("/api/commit", { id });
+      S.result[id] = r;
+      if (r.ok) { ok++; S.dup[id] = "exact"; S.sel.set(id, false); S.manual.delete(id); } else fail++;
+    } catch (e) { S.result[id] = { ok: false, error: e.message }; fail++; }
+  }
+  setBusy(false); render();
+  msg(`Commit finished: ${ok} retained, ${fail} failed.`, fail > 0);
+  loadStatus();
+}
+
+// ---- wiring ---------------------------------------------------------------
+$("btn-status").onclick = loadStatus;
+$("btn-load").onclick = loadSessions;
+$("btn-all").onclick = () => { for (const s of S.sessions) setSel(s.id, true); render(); };
+$("btn-none").onclick = () => { for (const s of S.sessions) setSel(s.id, false); render(); };
+$("btn-reset").onclick = () => { S.manual.clear(); for (const s of S.sessions) S.sel.set(s.id, defaultSel(s)); render(); };
+$("chk-visible").onchange = (ev) => { for (const s of visible()) setSel(s.id, ev.target.checked); render(); };
+$("view").onchange = render;
+$("btn-dups").onclick = checkDups;
+$("btn-dry").onclick = dryRun;
+$("btn-commit").onclick = commit;
+loadStatus();
+loadDefaults().then(loadSessions).catch(e => msg("Failed to load defaults: " + e.message, true));
+</script>
+</body>
+</html>
