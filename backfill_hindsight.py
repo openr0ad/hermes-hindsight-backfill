@@ -42,7 +42,8 @@ except ImportError:
 # The DB path and API URL come from the environment so nothing host-specific is
 # baked into source. HINDSIGHT_API_URL is the same variable the Hindsight Hermes
 # plugin uses; set it to http://<host>:8888 when Hindsight runs elsewhere.
-DEFAULT_DB = Path(os.path.expanduser(os.environ.get("HERMES_DB") or "~/.hermes/state.db"))
+DEFAULT_HERMES_HOME = Path(os.path.expanduser(os.environ.get("HERMES_HOME") or "~/.hermes"))
+DEFAULT_DB = Path(os.path.expanduser(os.environ.get("HERMES_DB") or str(DEFAULT_HERMES_HOME / "state.db")))
 DEFAULT_BANK_ID = os.environ.get("HINDSIGHT_BANK") or "hermes"
 DEFAULT_API_URL = os.environ.get("HINDSIGHT_API_URL") or "http://localhost:8888"
 TAG = "backfill"
@@ -518,6 +519,81 @@ def make_client(url: str, api_key: str | None = None) -> Hindsight:
 
 
 # ---------------------------------------------------------------------------
+# Hermes profiles → session DB and Hindsight bank
+# ---------------------------------------------------------------------------
+#
+# Each Hermes profile has its own home: the default profile is HERMES_HOME
+# itself (~/.hermes), others live in HERMES_HOME/profiles/<name>. Each home has
+# its own state.db, and the Hindsight Hermes plugin picks the bank from that
+# home's hindsight/config.json (falling back to the shared, legacy
+# ~/.hindsight/config.json). We mirror that so backfilled sessions land in the
+# bank the profile's live sessions go to.
+
+DEFAULT_PROFILE = "default"
+
+
+@dataclass
+class Profile:
+    name: str
+    home: Path
+    db: Path
+    bank: str | None          # None = can't tell; the user must choose
+    bank_source: str          # where the bank came from, for display
+    warning: str | None = None
+
+
+def resolve_profile_bank(name: str, home: Path) -> tuple[str | None, str, str | None]:
+    """(bank, source, warning) the Hindsight Hermes plugin would use for a profile."""
+    for cfg in (home / "hindsight" / "config.json", Path.home() / ".hindsight" / "config.json"):
+        if not cfg.is_file():
+            continue
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+        except Exception:
+            continue  # the plugin also skips unreadable/empty files
+        if not data:
+            continue
+        template = data.get("bank_id_template") or ""
+        if template:
+            placeholders = set(re.findall(r"\{(\w+)\}", template))
+            if placeholders <= {"profile"}:
+                return template.replace("{profile}", name), f"{cfg} (template)", None
+            return None, str(cfg), (f"bank template {template!r} depends on each session "
+                                    f"({', '.join(sorted(placeholders))}); choose a bank")
+        return data.get("bank_id") or data.get("bankId") or "hermes", str(cfg), None
+    return None, "", "this profile has no Hindsight config; choose a bank"
+
+
+def discover_profiles(hermes_home: Path = DEFAULT_HERMES_HOME) -> list[Profile]:
+    """Profiles that have a session database, default first."""
+    home = Path(hermes_home).expanduser()
+    homes = [(DEFAULT_PROFILE, home)]
+    pdir = home / "profiles"
+    if pdir.is_dir():
+        homes += sorted((d.name, d) for d in pdir.iterdir() if d.is_dir())
+    out = []
+    for name, h in homes:
+        db = h / "state.db"
+        if db.is_file():
+            bank, source, warning = resolve_profile_bank(name, h)
+            out.append(Profile(name, h, db, bank, source, warning))
+    return out
+
+
+def get_profile(name: str, hermes_home: Path = DEFAULT_HERMES_HOME) -> Profile:
+    for p in discover_profiles(hermes_home):
+        if p.name == name:
+            return p
+    raise ValueError(f"no Hermes profile {name!r} with a state.db under {hermes_home}")
+
+
+def list_banks(url: str, api_key: str | None = None) -> list[str]:
+    """Bank ids that exist in Hindsight (read-only)."""
+    data = _api_get(url, "/v1/default/banks", api_key=api_key, timeout=10)
+    return [b["bank_id"] for b in data.get("banks") or [] if b.get("bank_id")]
+
+
+# ---------------------------------------------------------------------------
 # Connectivity checks and duplicate detection (read-only Hindsight calls)
 # ---------------------------------------------------------------------------
 
@@ -555,8 +631,8 @@ def check_db(db_path: Path) -> dict:
         return {"ok": False, "path": str(p), "error": str(exc)}
 
 
-def check_hindsight(url: str, bank_id: str, api_key: str | None = None) -> dict:
-    """Is the Hindsight API reachable, and does the bank exist?"""
+def check_hindsight(url: str, bank_id: str | None, api_key: str | None = None) -> dict:
+    """Is the Hindsight API reachable, and (if given) does the bank exist?"""
     out: dict = {"url": url, "bank": bank_id}
     try:
         v = _api_get(url, "/version", api_key=api_key, timeout=5)
@@ -566,7 +642,11 @@ def check_hindsight(url: str, bank_id: str, api_key: str | None = None) -> dict:
         return {**out, "ok": False, "error": f"HTTP {exc.code}{hint}"}
     except Exception as exc:
         return {**out, "ok": False, "error": str(exc)}
+    if not bank_id:
+        return {**out, "ok": True}
     try:
+        if bank_id not in list_banks(url, api_key):
+            return {**out, "ok": False, "error": f"bank {bank_id!r} does not exist"}
         d = _api_get(url, f"/v1/default/banks/{urllib.parse.quote(bank_id)}/documents",
                      {"limit": 0}, api_key=api_key, timeout=10)
         out["documents"] = d.get("total")
@@ -643,9 +723,16 @@ def duplicate_status(session_id: str, index: BankSessionIndex) -> str | None:
 
 def main():
     ap = argparse.ArgumentParser(description="Backfill Hermes sessions into Hindsight")
-    ap.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to Hermes state.db (default: $HERMES_DB or ~/.hermes/state.db)")
+    ap.add_argument("--profile", type=str, default=None,
+                    help="Hermes profile to backfill: uses its state.db and the bank from its Hindsight "
+                         "config (see --list-profiles). --db / --bank-id override either.")
+    ap.add_argument("--list-profiles", action="store_true",
+                    help="List Hermes profiles with their session DB and Hindsight bank, then exit")
+    ap.add_argument("--hermes-home", type=Path, default=DEFAULT_HERMES_HOME,
+                    help="Hermes home holding state.db and profiles/ (default: $HERMES_HOME or ~/.hermes)")
+    ap.add_argument("--db", type=Path, default=None, help="Path to Hermes state.db (default: the profile's, else $HERMES_DB or ~/.hermes/state.db)")
     ap.add_argument("--url", type=str, default=DEFAULT_API_URL, help="Hindsight API base URL (default: $HINDSIGHT_API_URL or http://localhost:8888)")
-    ap.add_argument("--bank-id", type=str, default=DEFAULT_BANK_ID, help="Hindsight memory bank ID (default: $HINDSIGHT_BANK or hermes)")
+    ap.add_argument("--bank-id", type=str, default=None, help="Hindsight memory bank ID (default: the profile's bank, else $HINDSIGHT_BANK or hermes)")
     ap.add_argument("--min-turns", type=int, default=6, help="Minimum exchanges (user+assistant pairs)")
     ap.add_argument("--days", type=int, default=90, help="Look back N days")
     ap.add_argument("--until", type=parse_date_arg, default=None,
@@ -675,6 +762,29 @@ def main():
     ap.add_argument("--list-rules", action="store_true",
                     help="List the built-in title rules with their ids and exit")
     args = ap.parse_args()
+
+    if args.list_profiles:
+        profiles = discover_profiles(args.hermes_home)
+        if not profiles:
+            print(f"No Hermes profiles with a state.db under {args.hermes_home}")
+        for p in profiles:
+            print(f"{p.name:<12} bank={p.bank or '?':<12} db={p.db}")
+            if p.warning:
+                print(f"{'':<12} ! {p.warning}")
+        return
+
+    if args.profile:
+        try:
+            prof = get_profile(args.profile, args.hermes_home)
+        except ValueError as exc:
+            ap.error(str(exc))
+        args.db = args.db or prof.db
+        if not args.bank_id:
+            if not prof.bank:
+                ap.error(f"profile {prof.name!r}: {prof.warning} (pass --bank-id)")
+            args.bank_id = prof.bank
+    args.db = args.db or DEFAULT_DB
+    args.bank_id = args.bank_id or DEFAULT_BANK_ID
 
     if args.list_rules:
         for heading, rules in (("Skip sessions whose title mentions:", EXCLUDE_RULES),
@@ -711,7 +821,7 @@ def main():
     print(f"Min turns (exchanges): {args.min_turns}, Days: {args.days}, Dry run: {args.dry_run}")
     if args.until is not None:
         print(f"Until (inclusive): {datetime.fromtimestamp(args.until).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Hindsight URL: {args.url}")
+    print(f"Hindsight URL: {args.url}  bank: {args.bank_id}")
     if opts.exclude_tools:
         print(f"Excluding sessions that called: {', '.join(sorted(opts.exclude_tools))}")
     print(f"State file: {state_path} ({len(done)} already retained)")

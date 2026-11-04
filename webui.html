@@ -71,6 +71,11 @@
 <main>
   <section class="card">
     <h2>1. Which sessions</h2>
+    <div class="filters" style="margin-bottom:10px">
+      <label>Hermes profile <select id="f-profile"></select></label>
+      <label>Send to Hindsight bank <select id="f-bank"></select></label>
+      <span class="hint" id="bank-hint" style="align-self:center"></span>
+    </div>
     <div class="filters">
       <label>Started in the last (days) <input type="number" id="f-days" min="1"></label>
       <label>…and on or before (optional) <input type="date" id="f-until"></label>
@@ -136,7 +141,9 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const S = { sessions: [], byId: new Map(), sel: new Map(), manual: new Set(), dup: {}, result: {}, busy: false, defaults: null };
+const S = { sessions: [], byId: new Map(), sel: new Map(), manual: new Set(), dup: {}, result: {}, busy: false, defaults: null,
+            profiles: [], banks: [], profile: "default", bank: "" };
+const ctx = () => ({ profile: S.profile, bank: S.bank });
 
 function el(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
@@ -159,7 +166,7 @@ async function api(path, body) {
 function msg(text, isErr = false) { $("msg").textContent = text; $("msg").className = isErr ? "err" : "muted"; }
 function setBusy(b) {
   S.busy = b;
-  for (const id of ["btn-load", "btn-dups", "btn-dry", "btn-commit", "btn-all", "btn-none", "btn-reset"]) $(id).disabled = b;
+  for (const id of ["btn-load", "btn-dups", "btn-dry", "btn-commit", "btn-all", "btn-none", "btn-reset", "f-profile", "f-bank"]) $(id).disabled = b;
 }
 
 // ---- status ---------------------------------------------------------------
@@ -170,12 +177,50 @@ function pill(id, ok, text, title) {
 async function loadStatus() {
   pill("st-db", false, "Hermes DB: checking…"); pill("st-hs", false, "Hindsight: checking…");
   try {
-    const s = await api("/api/status");
+    const s = await api("/api/status?" + new URLSearchParams(ctx()));
     const d = s.db, h = s.hindsight;
-    pill("st-db", d.ok, d.ok ? `Hermes DB: ${d.sessions} sessions` : `Hermes DB: ${d.error}`, d.path);
-    pill("st-hs", h.ok, h.ok ? `Hindsight ${h.version}: bank “${h.bank}” (${h.documents} docs)` : `Hindsight: ${h.error}`, h.url);
+    pill("st-db", d.ok, d.ok ? `Hermes “${S.profile}”: ${d.sessions} sessions` : `Hermes DB: ${d.error}`, d.path);
+    pill("st-hs", h.ok, !h.ok ? `Hindsight: ${h.error}` : h.bank ? `Hindsight ${h.version}: bank “${h.bank}” (${h.documents} docs)` : `Hindsight ${h.version}: choose a bank`, h.url);
   } catch (e) { pill("st-db", false, "status failed: " + e.message); }
 }
+
+// ---- profile & bank -------------------------------------------------------
+const curProfile = () => S.profiles.find(p => p.name === S.profile);
+async function loadProfiles() {
+  const r = await api("/api/profiles");
+  S.profiles = r.profiles; S.banks = r.banks;
+  if (r.banks_error) msg("Could not list Hindsight banks: " + r.banks_error, true);
+  $("f-profile").replaceChildren(...S.profiles.map(p => el("option", { value: p.name, text: p.bank ? `${p.name}  →  ${p.bank}` : `${p.name}  (no bank set)` })));
+  if (!S.profiles.length) throw new Error(`no Hermes profiles with a state.db under ${r.hermes_home}`);
+  if (!curProfile()) S.profile = S.profiles[0].name;
+  $("f-profile").value = S.profile;
+  pickDefaultBank();
+}
+function pickDefaultBank() {
+  const p = curProfile();
+  const opts = [el("option", { value: "", text: "— choose a bank —" }), ...S.banks.map(b => el("option", { value: b, text: b }))];
+  $("f-bank").replaceChildren(...opts);
+  S.bank = p.bank && S.banks.includes(p.bank) ? p.bank : "";
+  $("f-bank").value = S.bank;
+  bankHint();
+}
+function bankHint() {
+  const p = curProfile();
+  let h = p.warning ? `⚠ ${p.warning}`
+    : p.bank && !S.banks.includes(p.bank) ? `⚠ this profile's bank “${p.bank}” doesn't exist in Hindsight; choose one`
+    : S.bank && S.bank !== p.bank ? `⚠ this profile normally uses “${p.bank}”`
+    : p.bank ? `From ${p.bank_source}` : "";
+  $("bank-hint").textContent = h; $("bank-hint").title = p.db;
+}
+$("f-profile").onchange = () => { S.profile = $("f-profile").value; pickDefaultBank(); loadStatus(); loadSessions(); };
+$("f-bank").onchange = () => {
+  S.bank = $("f-bank").value; bankHint(); loadStatus();
+  // Duplicate status and results belong to the previous bank.
+  S.dup = {}; S.dupChecked = false; S.result = {};
+  for (const s of S.sessions) if (!S.manual.has(s.id)) S.sel.set(s.id, defaultSel(s));
+  $("dry-card").hidden = true; render();
+};
+const needBank = () => { if (S.bank) return false; msg("Choose a Hindsight bank first.", true); return true; };
 
 // ---- filters & title rules ------------------------------------------------
 const lines = (s) => s.split("\n").map(x => x.trim()).filter(Boolean);
@@ -221,7 +266,7 @@ const defaultSel = (s) => s.included && S.dup[s.id] !== "exact" && !(S.result[s.
 async function loadSessions() {
   setBusy(true); msg("Loading sessions and applying the rules…");
   try {
-    const r = await api("/api/sessions", filterBody());
+    const r = await api("/api/sessions", { ...filterBody(), ...ctx() });
     S.sessions = r.sessions; S.byId = new Map(r.sessions.map(s => [s.id, s]));
     S.sel = new Map(); S.manual = new Set(); S.dup = {}; S.result = {}; S.dupChecked = false;
     for (const s of S.sessions) S.sel.set(s.id, defaultSel(s));
@@ -278,9 +323,10 @@ const selectedIds = () => S.sessions.filter(s => S.sel.get(s.id)).map(s => s.id)
 // ---- duplicates / preview / send -----------------------------------------
 async function checkDups() {
   if (!S.sessions.length) return msg("Load sessions first.", true);
+  if (needBank()) return;
   setBusy(true); msg("Asking Hindsight which sessions it already has (read-only)…");
   try {
-    const r = await api("/api/duplicates", { ids: S.sessions.map(s => s.id) });
+    const r = await api("/api/duplicates", { ids: S.sessions.map(s => s.id), ...ctx() });
     S.dup = r.statuses; S.dupChecked = true;
     for (const s of S.sessions) if (!S.manual.has(s.id)) S.sel.set(s.id, defaultSel(s));
     const vals = Object.values(r.statuses);
@@ -290,9 +336,10 @@ async function checkDups() {
 }
 async function preview(ids) {
   if (!ids.length) return msg("Nothing selected.", true);
+  if (needBank()) return;
   setBusy(true); msg("Building preview (nothing is sent)…");
   try {
-    const r = await api("/api/preview", { ids });
+    const r = await api("/api/preview", { ids, ...ctx() });
     const box = $("dry-items"); box.replaceChildren();
     let chars = 0, ok = 0;
     for (const it of r.items) {
@@ -317,15 +364,16 @@ async function preview(ids) {
 async function commit() {
   const ids = selectedIds();
   if (!ids.length) return msg("Nothing selected.", true);
+  if (needBank()) return;
   const warn = !S.dupChecked ? "\n\n(Hindsight will still refuse any session it already has.)" : "";
-  if (!confirm(`Send ${ids.length} session(s) to bank “${S.defaults.bank}” at ${S.defaults.url}?${warn}`)) return;
+  if (!confirm(`Send ${ids.length} session(s) from Hermes profile “${S.profile}” to Hindsight bank “${S.bank}” at ${S.defaults.url}?${warn}`)) return;
   setBusy(true);
   let ok = 0, skipped = 0, fail = 0;
   for (const [i, id] of ids.entries()) {
     S.result[id] = { pending: true }; render();
     msg(`Sending ${i + 1} of ${ids.length}…`);
     try {
-      const r = await api("/api/commit", { id });
+      const r = await api("/api/commit", { id, ...ctx() });
       S.result[id] = r;
       if (r.ok || r.skipped) { S.dup[id] = "exact"; S.sel.set(id, false); S.manual.delete(id); }
       if (r.ok) ok++; else if (r.skipped) skipped++; else fail++;
@@ -352,8 +400,8 @@ for (const b of document.querySelectorAll("[data-all],[data-none]")) {
   b.onclick = () => { const kind = b.dataset.all || b.dataset.none;
     for (const c of ruleBoxes(kind)) { c.checked = !!b.dataset.all; c.dispatchEvent(new Event("change")); } };
 }
-loadStatus();
-loadDefaults().then(loadSessions).catch(e => msg("Failed to load defaults: " + e.message, true));
+loadProfiles().then(() => { loadStatus(); return loadDefaults(); }).then(loadSessions)
+  .catch(e => msg("Failed to start: " + e.message, true));
 </script>
 </body>
 </html>

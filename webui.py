@@ -21,6 +21,7 @@ import re
 import sys
 import threading
 import traceback
+import urllib.parse
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,9 +53,8 @@ CONFIG_LOADED = load_config_file(CONFIG_PATH)
 
 import backfill_hindsight as core  # noqa: E402
 
-DB_PATH = core.DEFAULT_DB
+HERMES_HOME = core.DEFAULT_HERMES_HOME
 API_URL = core.DEFAULT_API_URL
-BANK_ID = core.DEFAULT_BANK_ID
 API_KEY = os.environ.get("HINDSIGHT_API_KEY") or None
 HOST = os.environ.get("WEBUI_HOST") or "0.0.0.0"
 PORT = int(os.environ.get("WEBUI_PORT") or 8765)
@@ -119,13 +119,28 @@ def _filter_options(body: dict) -> core.FilterOptions:
         raise BadRequest(str(exc))
 
 
+def _profile(body: dict) -> core.Profile:
+    """The Hermes profile named in the request (only discovered profiles are allowed)."""
+    try:
+        return core.get_profile(str(body.get("profile") or core.DEFAULT_PROFILE), HERMES_HOME)
+    except ValueError as exc:
+        raise BadRequest(str(exc))
+
+
+def _bank(body: dict) -> str:
+    bank = str(body.get("bank") or "").strip()
+    if not bank:
+        raise BadRequest("choose a Hindsight bank first")
+    return bank
+
+
 def _fmt_ts(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
 
 
 def list_sessions(body: dict) -> dict:
     opts = _filter_options(body)
-    conn = core.connect_db(DB_PATH)
+    conn = core.connect_db(_profile(body).db)
     try:
         # min_turns=0: list short sessions too, with a reason, so they can be
         # selected manually. evaluate_session() applies the real threshold.
@@ -151,7 +166,7 @@ def list_sessions(body: dict) -> dict:
             "included": sum(1 for s in out if s["included"])}
 
 
-def _payload_for(conn, session_id: str) -> dict:
+def _payload_for(conn, session_id: str, bank: str) -> dict:
     """Payload for one session, independent of filters (manual selection wins)."""
     s = core.get_session(conn, session_id)
     if not s:
@@ -159,7 +174,7 @@ def _payload_for(conn, session_id: str) -> dict:
     msgs = core.get_session_messages(conn, session_id)
     if not msgs:
         raise BadRequest("session has no messages; nothing to send")
-    return core.build_retain_payload(s, core.format_conversation(msgs, s), BANK_ID)
+    return core.build_retain_payload(s, core.format_conversation(msgs, s), bank)
 
 
 def _ids(body: dict) -> list[str]:
@@ -171,12 +186,13 @@ def _ids(body: dict) -> list[str]:
 
 def preview(body: dict) -> dict:
     """Preview: build exactly what would be sent. Makes no Hindsight calls."""
-    conn = core.connect_db(DB_PATH)
+    bank = _bank(body)
+    conn = core.connect_db(_profile(body).db)
     items = []
     try:
         for sid in _ids(body):
             try:
-                items.append({"id": sid, "ok": True, "payload": _payload_for(conn, sid)})
+                items.append({"id": sid, "ok": True, "payload": _payload_for(conn, sid, bank)})
             except BadRequest as exc:
                 items.append({"id": sid, "ok": False, "error": str(exc)})
     finally:
@@ -188,10 +204,15 @@ def commit_one(body: dict) -> dict:
     sid = body.get("id")
     if not isinstance(sid, str):
         raise BadRequest("id is required")
-    conn = core.connect_db(DB_PATH)
+    bank = _bank(body)
+    # Hindsight creates banks on first write, so a typo would silently make a
+    # new bank. Only write to banks that already exist.
+    if bank not in core.list_banks(API_URL, API_KEY):
+        raise BadRequest(f"bank {bank!r} does not exist in Hindsight")
+    conn = core.connect_db(_profile(body).db)
     try:
         try:
-            payload = _payload_for(conn, sid)
+            payload = _payload_for(conn, sid, bank)
         except BadRequest as exc:
             return {"id": sid, "ok": False, "error": str(exc)}
     finally:
@@ -227,22 +248,38 @@ def _error_text(exc: Exception) -> str:
 
 def duplicates(body: dict) -> dict:
     ids = _ids(body)
-    idx = core.fetch_bank_session_index(API_URL, BANK_ID, API_KEY)
+    idx = core.fetch_bank_session_index(API_URL, _bank(body), API_KEY)
     statuses = {sid: st for sid in ids if (st := core.duplicate_status(sid, idx))}
     return {"documents_scanned": idx.documents_scanned, "statuses": statuses,
             "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def status() -> dict:
-    return {"db": core.check_db(DB_PATH),
-            "hindsight": core.check_hindsight(API_URL, BANK_ID, API_KEY),
+def status(query: dict) -> dict:
+    """Connection status for the chosen profile's DB and bank."""
+    prof = _profile(query)
+    bank = (query.get("bank") or "").strip()
+    return {"db": core.check_db(prof.db),
+            "hindsight": core.check_hindsight(API_URL, bank or None, API_KEY),
             "config_file": str(CONFIG_PATH) if CONFIG_LOADED else None}
 
 
-def defaults() -> dict:
+def profiles(_query: dict) -> dict:
+    """Hermes profiles (with their default bank) and the banks Hindsight has."""
+    out = {"hermes_home": str(HERMES_HOME), "url": API_URL,
+           "profiles": [{"name": p.name, "db": str(p.db), "bank": p.bank,
+                         "bank_source": p.bank_source, "warning": p.warning}
+                        for p in core.discover_profiles(HERMES_HOME)]}
+    try:
+        out["banks"] = core.list_banks(API_URL, API_KEY)
+    except Exception as exc:
+        out["banks"], out["banks_error"] = [], str(exc)
+    return out
+
+
+def defaults(_query: dict) -> dict:
     d = core.FilterOptions()
     return {
-        "bank": BANK_ID, "url": API_URL, "db": str(DB_PATH),
+        "url": API_URL,
         "min_turns": d.min_turns, "days": d.days, "min_tool_calls": d.min_tool_calls,
         "exclude_tools": sorted(d.exclude_tools),
         "exclude_rules": [vars(r) for r in core.EXCLUDE_RULES],
@@ -250,7 +287,7 @@ def defaults() -> dict:
     }
 
 
-ROUTES_GET = {"/api/status": status, "/api/defaults": defaults}
+ROUTES_GET = {"/api/status": status, "/api/defaults": defaults, "/api/profiles": profiles}
 ROUTES_POST = {"/api/sessions": list_sessions, "/api/preview": preview,
                "/api/commit": commit_one, "/api/duplicates": duplicates}
 
@@ -279,11 +316,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
 
     def do_GET(self) -> None:
-        path = self.path.split("?", 1)[0]
+        path, _, qs = self.path.partition("?")
+        query = {k: v[-1] for k, v in urllib.parse.parse_qs(qs).items()}
         if path in ("/", "/index.html"):
             self._send(200, (HERE / "webui.html").read_bytes(), "text/html; charset=utf-8")
         elif path in ROUTES_GET:
-            self._run(ROUTES_GET[path])
+            self._run(ROUTES_GET[path], query)
         else:
             self._json(404, {"error": "not found"})
 
@@ -307,11 +345,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"Hermes DB:     {DB_PATH}")
-    print(f"Hindsight API: {API_URL} (bank {BANK_ID!r})")
+    print(f"Hermes home:   {HERMES_HOME}")
+    for p in core.discover_profiles(HERMES_HOME):
+        print(f"  profile {p.name:<12} -> bank {p.bank or '(choose in UI)'}")
+    print(f"Hindsight API: {API_URL}")
     print(f"Config file:   {CONFIG_PATH if CONFIG_LOADED else '(none; using environment)'}")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Listening on http://{HOST}:{PORT}/  (no auth — LAN only)", flush=True)
+    print(f"Listening on http://{HOST}:{PORT}/  (no auth - LAN only)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
