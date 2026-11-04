@@ -281,19 +281,20 @@ The CLI reads `HERMES_HOME`, `HERMES_DB`, `HINDSIGHT_API_URL` and
 
 ### Running on a Raspberry Pi
 
-Requires Python 3.11+. Raspberry Pi OS Bookworm ships 3.11.
+Requires Python 3.11+. Raspberry Pi OS **Bookworm** ships 3.11; **Bullseye**
+ships 3.9, which is too old. uv handles both: it downloads its own Python for
+this project and leaves the system Python alone.
 
 ```bash
 git clone https://github.com/openr0ad/hermes-hindsight-backfill.git
 cd hermes-hindsight-backfill
 
-# Option 1: uv (installs into .venv)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync
+# Recommended: uv (fetches Python 3.11+ if the system's is older)
+command -v uv || curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync            # creates .venv with the right Python and dependencies
 
-# Option 2: plain venv + pip
-python3 -m venv .venv
-.venv/bin/pip install hindsight-client
+# Alternative, only if `python3 --version` is 3.11 or newer:
+#   python3 -m venv .venv && .venv/bin/pip install hindsight-client
 
 cp config.example.env config.env
 nano config.env      # set HINDSIGHT_API_URL=http://<hindsight-host>:8888
