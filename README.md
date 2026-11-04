@@ -27,8 +27,34 @@ Sessions pass through a five-stage filter before being retained:
 5. **Length check** — formatted text must be at least 200 characters
 
 A state file (`~/.hermes/.backfill_state.json`) tracks retained session IDs
-so re-runs skip already-processed sessions automatically. Pass
-`--no-skip-tagged` to reprocess everything.
+so CLI re-runs skip already-processed sessions automatically. Pass
+`--no-skip-tagged` to reprocess everything. (The web UI doesn't use this
+file; it asks Hindsight directly — see [Duplicate check](#duplicate-check).)
+
+## Session identity in Hindsight
+
+Each backfilled session is retained with:
+
+| Field         | Value                                   |
+| ------------- | --------------------------------------- |
+| `document_id` | `backfill:<hermes session id>`          |
+| `tags`        | `backfill`, `session:<hermes session id>` |
+| `metadata`    | `session_id`, `source=hermes-hindsight-backfill` |
+
+The `session:<id>` tag and `session_id` metadata match what the Hindsight
+Hermes plugin writes for live sessions, so one lookup finds a session no matter
+which path stored it. The document id is prefixed on purpose: the plugin uses
+the bare session id as *its* document id, and retaining with the same id would
+replace the live document.
+
+Re-running a backfill for the same session replaces its `backfill:<id>`
+document rather than adding a second copy.
+
+> **Older backfills** (before this change) were tagged only
+> `session:<first 8 chars>`, which for Hermes ids is just the date
+> (`YYYYMMDD`). They have random document ids and can't be tied to one
+> session; the duplicate check reports them as *possible* duplicates for every
+> session started that day.
 
 ### Sessions with a NULL `session_key`
 
@@ -76,11 +102,13 @@ matches a keep pattern — `--no-exclude-tools` is the broader escape hatch.
 - [Hermes](https://github.com/nousresearch/hermes) installed with session
   history in `~/.hermes/state.db`
 - [Hindsight](https://github.com/vectorize-io/hindsight) running and accessible
-  (default: `http://localhost:8888`)
-- `hindsight-all` Python package:
+  (default: `http://localhost:8888`). Use the **API** port, not the Control
+  Plane UI port.
+- `hindsight-client` Python package (installed automatically by `uv sync` /
+  `uv run`; the full `hindsight-all` stack is not needed):
 
 ```bash
-uv pip install hindsight-all
+uv pip install hindsight-client
 ```
 
 ## Installation
@@ -115,7 +143,7 @@ python3 backfill_hindsight.py --days 31 --until 2026-10-31 --min-turns 6
 python3 backfill_hindsight.py --url http://my-server:8888 --bank-id my-bank
 
 # Hindsight on another host (Docker/VM) — set once instead of passing --url
-export HINDSIGHT_API_URL=http://10.0.0.8:8888
+export HINDSIGHT_API_URL=http://<hindsight-host>:8888
 python3 backfill_hindsight.py --days 90
 
 # Exclude sessions by title pattern (repeatable)
@@ -134,9 +162,9 @@ python3 backfill_hindsight.py --no-skip-tagged
 
 | Flag                | Default                          | Description                                                    |
 | ------------------- | -------------------------------- | -------------------------------------------------------------- |
-| `--db`              | `~/.hermes/state.db`             | Path to Hermes session database                                |
+| `--db`              | `$HERMES_DB` → `~/.hermes/state.db` | Path to Hermes session database (opened read-only)          |
 | `--url`             | `$HINDSIGHT_API_URL` → `http://localhost:8888` | Hindsight API base URL (Hindsight is often on another host) |
-| `--bank-id`         | `hermes`                         | Hindsight memory bank ID                                       |
+| `--bank-id`         | `$HINDSIGHT_BANK` → `hermes`     | Hindsight memory bank ID                                       |
 | `--min-turns`       | `6`                              | Minimum exchanges (user+assistant pairs) per session           |
 | `--days`            | `90`                             | How far back to look                                           |
 | `--until`           | none                             | Upper bound: only sessions started on/before this date (`YYYY-MM-DD` = end of day, inclusive) |
@@ -151,6 +179,126 @@ python3 backfill_hindsight.py --no-skip-tagged
 | `--keep-pattern`    | —                                | Regex that forces a title to be kept, overriding both exclusions |
 | `--exclude-tool`    | `log_meal`                       | Skip sessions that called this tool (repeatable)               |
 | `--no-exclude-tools`| off                              | Disable tool-based exclusion entirely                          |
+
+## Web UI
+
+A small local web UI (`webui.py` + `webui.html`) wraps the same filter and
+retain code as the CLI. It's a single Python process on the standard-library
+HTTP server, with no extra dependencies. It's meant to run on the same machine
+as Hermes (e.g. a Raspberry Pi) and be opened from any browser on your LAN.
+
+What it does:
+
+- **Connection status**: whether the Hermes DB is found and readable, and
+  whether the Hindsight API and bank are reachable.
+- **Session list**: every session in the date window, with *all* the reasons
+  the filters exclude it (too few turns, title pattern, excluded tool, chat
+  only, too short) plus keep-pattern overrides.
+- **Selection**: tick/untick rows, select all / none, reset to the filters.
+  A manual selection overrides the filters.
+- **Dry run**: shows the exact payload (document id, tags, metadata, full
+  text) for each selected session. No calls are made to Hindsight.
+- **Commit**: retains the selected sessions one at a time and shows the result
+  for each.
+- <a id="duplicate-check"></a>**Check duplicates** (on demand): lists the
+  bank's documents (read-only) and marks sessions that are already present,
+  matched on the full session id from either the live Hermes plugin or this
+  tool. Exact duplicates are deselected. Old date-only backfills show as
+  *possible* duplicates (see [Session identity](#session-identity-in-hindsight)).
+
+> ⚠️ There is **no authentication**. By default it listens on `0.0.0.0`, so
+> anyone on your LAN can open it and commit to Hindsight. Set
+> `WEBUI_HOST=127.0.0.1` to restrict it to the local machine.
+
+### Configuration
+
+Settings come from environment variables. Optionally, put them in a
+`config.env` file next to `webui.py` (git-ignored), or in a file named by
+`$WEBUI_CONFIG`. Real environment variables take precedence over the file.
+
+```bash
+cp config.example.env config.env   # then edit
+```
+
+| Variable            | Default                 | Description                                   |
+| ------------------- | ----------------------- | --------------------------------------------- |
+| `HERMES_DB`         | `~/.hermes/state.db`    | Hermes DB (relative paths are relative to the working directory) |
+| `HINDSIGHT_API_URL` | `http://localhost:8888` | Hindsight **API** URL                         |
+| `HINDSIGHT_API_KEY` | —                       | Bearer token, if your API requires one        |
+| `HINDSIGHT_BANK`    | `hermes`                | Bank to write to and check                    |
+| `WEBUI_HOST`        | `0.0.0.0`               | Bind address                                  |
+| `WEBUI_PORT`        | `8765`                  | Port                                          |
+
+The CLI reads `HERMES_DB`, `HINDSIGHT_API_URL` and `HINDSIGHT_BANK` from the
+environment too. It does not read `config.env`.
+
+### Running on a Raspberry Pi
+
+Requires Python 3.11+. Raspberry Pi OS Bookworm ships 3.11.
+
+```bash
+git clone https://github.com/openr0ad/hermes-hindsight-backfill.git
+cd hermes-hindsight-backfill
+
+# Option 1: uv (installs into .venv)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+
+# Option 2: plain venv + pip
+python3 -m venv .venv
+.venv/bin/pip install hindsight-client
+
+cp config.example.env config.env
+nano config.env      # set HINDSIGHT_API_URL=http://<hindsight-host>:8888
+
+.venv/bin/python webui.py
+# → open http://<pi-hostname>:8765/ from any machine on the LAN
+```
+
+To keep it running across reboots, create a systemd service. Replace `<you>`
+with your Pi username:
+
+```ini
+# /etc/systemd/system/hermes-backfill-webui.service
+[Unit]
+Description=Hermes → Hindsight backfill web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=<you>
+WorkingDirectory=/home/<you>/hermes-hindsight-backfill
+ExecStart=/home/<you>/hermes-hindsight-backfill/.venv/bin/python webui.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now hermes-backfill-webui
+journalctl -u hermes-backfill-webui -f    # logs
+```
+
+### Development (Windows or any other machine)
+
+Copy the Hermes DB from the Pi into `dev-data/` (git-ignored). Copy
+`state.db` together with its `-wal` and `-shm` files. Then point the config at
+it:
+
+```ini
+# config.env
+HERMES_DB=./dev-data/state.db
+HINDSIGHT_API_URL=http://<hindsight-host>:8888
+WEBUI_HOST=127.0.0.1
+```
+
+```bash
+uv run webui.py
+```
+
+The DB is always opened read-only.
 
 ## Tuning exclusion patterns
 
@@ -181,7 +329,7 @@ Use the resulting date to set `--days` appropriately for a full backfill.
 
 ## Requirements
 
-- Python 3.11+ (required by `hindsight-all`)
+- Python 3.11+
 
 ## License
 
