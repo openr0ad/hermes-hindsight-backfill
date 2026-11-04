@@ -18,8 +18,8 @@ Sessions pass through a five-stage filter before being retained:
 
 1. **Date + turn filter** — must be within `--days` window (and on/before
    `--until` if given) and have at least `--min-turns` exchanges
-2. **Exclusion patterns** — sessions whose title matches any pattern in
-   `DEFAULT_EXCLUDE_PATTERNS` (or `--exclude-pattern`) are skipped
+2. **Title rules** — sessions whose title mentions a skip word (`EXCLUDE_RULES`,
+   or `--exclude-pattern`) are skipped, unless it also mentions a keep word
 3. **Excluded tools** — sessions that called any tool in `DEFAULT_EXCLUDE_TOOLS`
    (or `--exclude-tool`) are skipped — see below
 4. **Substantive check** — must have at least one tool call or a code block;
@@ -37,18 +37,21 @@ Each backfilled session is retained with:
 
 | Field         | Value                                   |
 | ------------- | --------------------------------------- |
-| `document_id` | `backfill:<hermes session id>`          |
+| `document_id` | `<hermes session id>`                   |
 | `tags`        | `backfill`, `session:<hermes session id>` |
 | `metadata`    | `session_id`, `source=hermes-hindsight-backfill` |
 
-The `session:<id>` tag and `session_id` metadata match what the Hindsight
-Hermes plugin writes for live sessions, so one lookup finds a session no matter
-which path stored it. The document id is prefixed on purpose: the plugin uses
-the bare session id as *its* document id, and retaining with the same id would
-replace the live document.
+This is the same identity the Hindsight Hermes plugin uses for live sessions
+(document id = session id, `session:<id>` tag, `session_id` metadata), so a
+session has **one document** no matter which path stored it. The `backfill`
+tag records where it came from.
 
-Re-running a backfill for the same session replaces its `backfill:<id>`
-document rather than adding a second copy.
+**Sessions already in Hindsight are never sent.** Retaining with an existing
+document id would *replace* that document (for a live-captured session, the
+plugin's), so before each send the tool looks the session up by document id
+and by `session:<id>` tag, and refuses if anything is found. This applies to
+both the CLI and the web UI, and to sessions ticked by hand. To re-send a
+session, delete its document in Hindsight first.
 
 > **Older backfills** (before this change) were tagged only
 > `session:<first 8 chars>`, which for Hermes ids is just the date
@@ -84,10 +87,10 @@ python3 backfill_hindsight.py --days 90 --exclude-tool log_peptide
 python3 backfill_hindsight.py --days 90 --no-exclude-tools
 ```
 
-The title patterns in `DEFAULT_EXCLUDE_PATTERNS` remain as a fallback for older
+The meal words in the title rules remain as a fallback for older
 sessions that logged meals without going through the plugin.
 
-**Engineering work wins.** Any title matching `DEFAULT_KEEP_PATTERNS` (`fix`,
+**Engineering work wins.** Any title mentioning a keep word (`fix`,
 `rebuild`, `debug`, `prompt`, `protocol`, `integration`, `.csv`, `error`,
 `script`, `bug`, `skill`, `schema`, `cron`) is kept regardless of both filters —
 so *"Rebuilding meals.csv after write error"* and *"New nutrition logging
@@ -127,7 +130,7 @@ uv run backfill_hindsight.py
 ## Usage
 
 ```bash
-# Dry run — preview what would be retained (no writes)
+# Dry run — preview what would be retained (no writes, no Hindsight calls)
 python3 backfill_hindsight.py --dry-run
 
 # Inspect session text before committing
@@ -179,6 +182,8 @@ python3 backfill_hindsight.py --no-skip-tagged
 | `--keep-pattern`    | —                                | Regex that forces a title to be kept, overriding both exclusions |
 | `--exclude-tool`    | `log_meal`                       | Skip sessions that called this tool (repeatable)               |
 | `--no-exclude-tools`| off                              | Disable tool-based exclusion entirely                          |
+| `--disable-rule`    | —                                | Switch off a built-in title rule by id (repeatable)            |
+| `--list-rules`      | —                                | List built-in title rules with their ids, then exit            |
 
 ## Web UI
 
@@ -196,11 +201,15 @@ What it does:
   only, too short) plus keep-pattern overrides.
 - **Selection**: tick/untick rows, select all / none, reset to the filters.
   A manual selection overrides the filters.
-- **Dry run**: shows the exact payload (document id, tags, metadata, full
-  text) for each selected session. No calls are made to Hindsight.
-- **Commit**: retains the selected sessions one at a time and shows the result
-  for each.
-- <a id="duplicate-check"></a>**Check duplicates** (on demand): lists the
+- **Title rules** in plain language ("Skip sessions whose title mentions
+  *breakfast*"), each with its own checkbox, plus your own words or phrases.
+  An advanced option takes regular expressions instead.
+- **Preview** (selected rows, or **View** on a single row): shows exactly what
+  would be sent — document id, tags, metadata and the full text. Nothing is sent.
+- **Send selected to Hindsight**: retains the selected sessions one at a time
+  and shows the result for each. Sessions Hindsight already has are refused
+  ("not sent: already there") — see [Session identity](#session-identity-in-hindsight).
+- <a id="duplicate-check"></a>**Check what's already in Hindsight** (on demand): lists the
   bank's documents (read-only) and marks sessions that are already present,
   matched on the full session id from either the live Hermes plugin or this
   tool. Exact duplicates are deselected. Old date-only backfills show as
@@ -300,22 +309,43 @@ uv run webui.py
 
 The DB is always opened read-only.
 
-## Tuning exclusion patterns
+## Tuning title rules
 
-The script ships with default exclusions for high-volume, low-value titles:
+The script ships with built-in title rules. Each has an id and a plain label:
+
+```bash
+python3 backfill_hindsight.py --list-rules
+```
 
 ```
-quick question, weather, breakfast, lunch, dinner,
-macro(s), logged, nutrition, greeting
+Skip sessions whose title mentions:
+  quick-question   "quick question"
+  weather          "weather"
+  breakfast        "breakfast"
+  ...
+Always keep sessions whose title mentions (overrides skips):
+  fix              "fix"
+  ...
 ```
 
-Exclusion matches only on session **title**, not message content. A session
+Switch individual rules off with `--disable-rule` (repeatable), or add your own
+regexes with `--exclude-pattern` / `--keep-pattern`:
+
+```bash
+python3 backfill_hindsight.py --dry-run --disable-rule breakfast --disable-rule lunch
+python3 backfill_hindsight.py --dry-run --exclude-pattern "grocer(y|ies)"
+```
+
+In the web UI the same rules are checkboxes under **Title rules**, and custom
+entries are plain words or phrases (matched as whole words, ignoring case).
+
+Rules match only on the session **title**, not message content. A session
 that starts as a food log but pivots into a technical discussion will have a
 food-themed title and can get excluded. Review borderline sessions with
-`--show-text` before committing.
+`--show-text` (or **View** in the web UI) before sending.
 
-Add patterns permanently in `DEFAULT_EXCLUDE_PATTERNS` at the top of the script,
-or pass them at runtime via `--exclude-pattern`.
+To change the built-ins permanently, edit `EXCLUDE_RULES` / `KEEP_RULES` at the
+top of the script.
 
 ## Finding your oldest session
 
