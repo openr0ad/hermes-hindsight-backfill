@@ -5,3 +5,10 @@ __pycache__/
 *.swp
 .DS_Store
 .venv/
+
+# Local Hermes DB copy for development — never commit (contains private sessions)
+dev-data/
+
+# Local config (may contain LAN addresses / API keys); commit config.example.env instead
+config.env
+*.local.env
