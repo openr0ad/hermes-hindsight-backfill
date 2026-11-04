@@ -290,8 +290,8 @@ class FilterOptions:
     until: float | None = None
     exclude_missing_session_key: bool = False
     min_tool_calls: int = 1
-    extra_exclude_patterns: list[str] = field(default_factory=list)  # raw regexes
-    extra_keep_patterns: list[str] = field(default_factory=list)     # raw regexes
+    extra_exclude_patterns: list = field(default_factory=list)  # regexes or (label, regex)
+    extra_keep_patterns: list = field(default_factory=list)     # regexes or (label, regex)
     exclude_tools: set[str] = field(default_factory=lambda: set(DEFAULT_EXCLUDE_TOOLS))
     disabled_rules: set[str] = field(default_factory=set)  # TitleRule ids switched off
 
@@ -304,10 +304,15 @@ class FilterOptions:
         self.exclude_re = self._compile(EXCLUDE_RULES, self.extra_exclude_patterns)
         self.keep_re = self._compile(KEEP_RULES, self.extra_keep_patterns)
 
-    def _compile(self, builtin: list[TitleRule], extra: list[str]) -> list[CompiledRule]:
+    def _compile(self, builtin: list[TitleRule], extra: list) -> list[CompiledRule]:
         rules = [(r.label, re.compile(r.pattern, re.IGNORECASE))
                  for r in builtin if r.id not in self.disabled_rules]
-        return rules + [(f"/{p}/", re.compile(p, re.IGNORECASE)) for p in extra]
+        # Extras are raw regexes, or (label, regex) pairs when the caller has a
+        # friendlier label (the web UI's plain-word entries).
+        for item in extra:
+            label, pat = item if isinstance(item, tuple) else (f"/{item}/", item)
+            rules.append((label, re.compile(pat, re.IGNORECASE)))
+        return rules
 
 
 @dataclass

@@ -92,6 +92,13 @@ def _filter_options(body: dict) -> core.FilterOptions:
             raise BadRequest(f"{name} must be a list")
         return [str(v).strip() for v in val if str(v).strip()]
 
+    # Custom title rules arrive as plain words (matched as whole words) unless
+    # the user ticked "these are regular expressions".
+    as_regex = bool(body.get("custom_is_regex"))
+    def rules(name: str) -> list[str]:
+        items = str_list(name)
+        return items if as_regex else [(f'"{w}"', core.word_pattern(w)) for w in items]
+
     tools = body.get("exclude_tools")
     try:
         return core.FilterOptions(
@@ -100,13 +107,16 @@ def _filter_options(body: dict) -> core.FilterOptions:
             until=until,
             exclude_missing_session_key=bool(body.get("exclude_missing_session_key")),
             min_tool_calls=num("min_tool_calls", 1),
-            extra_exclude_patterns=str_list("extra_exclude_patterns"),
-            extra_keep_patterns=str_list("extra_keep_patterns"),
+            extra_exclude_patterns=rules("custom_exclude"),
+            extra_keep_patterns=rules("custom_keep"),
             exclude_tools=set(str_list("exclude_tools")) if tools is not None
             else set(core.DEFAULT_EXCLUDE_TOOLS),
+            disabled_rules=set(str_list("disabled_rules")),
         )
     except re.error as exc:
-        raise BadRequest(f"invalid regex: {exc}")
+        raise BadRequest(f"invalid regular expression: {exc}")
+    except ValueError as exc:
+        raise BadRequest(str(exc))
 
 
 def _fmt_ts(ts: float | None) -> str:
@@ -160,7 +170,7 @@ def _ids(body: dict) -> list[str]:
 
 
 def preview(body: dict) -> dict:
-    """Dry run: build exactly what would be sent. Makes no Hindsight calls."""
+    """Preview: build exactly what would be sent. Makes no Hindsight calls."""
     conn = core.connect_db(DB_PATH)
     items = []
     try:
@@ -189,7 +199,9 @@ def commit_one(body: dict) -> dict:
     with _commit_lock:
         client = core.make_client(API_URL, API_KEY)
         try:
-            core.retain_payload(client, payload)
+            core.retain_new(client, payload, API_URL, API_KEY)
+        except core.AlreadyInHindsight as exc:
+            return {"id": sid, "ok": False, "skipped": True, "error": str(exc)}
         except Exception as exc:
             return {"id": sid, "ok": False, "error": _error_text(exc)}
         finally:
@@ -233,8 +245,8 @@ def defaults() -> dict:
         "bank": BANK_ID, "url": API_URL, "db": str(DB_PATH),
         "min_turns": d.min_turns, "days": d.days, "min_tool_calls": d.min_tool_calls,
         "exclude_tools": sorted(d.exclude_tools),
-        "default_exclude_patterns": core.DEFAULT_EXCLUDE_PATTERNS,
-        "default_keep_patterns": core.DEFAULT_KEEP_PATTERNS,
+        "exclude_rules": [vars(r) for r in core.EXCLUDE_RULES],
+        "keep_rules": [vars(r) for r in core.KEEP_RULES],
     }
 
 
