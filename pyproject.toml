@@ -5,10 +5,11 @@ description = "Backfill Hermes session history into Hindsight long-term memory"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-dependencies = ["hindsight-all"]
+dependencies = ["hindsight-client>=0.9"]
 
 [project.scripts]
 hermes-backfill = "backfill_hindsight:cli"
+hermes-backfill-webui = "webui:main"
 
 [tool.uv]
 # Allow running directly via `uv run backfill_hindsight.py`

@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes → Hindsight backfill</title>
+<style>
+  :root { --fg:#1d2228; --muted:#69737d; --line:#dde1e5; --bg:#f6f7f8; --card:#fff;
+          --ok:#1d7a46; --bad:#b3261e; --warn:#9a6700; --accent:#2457c5; --manual:#f2c94c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e3e6e9; --muted:#9aa3ab; --line:#353b41; --bg:#16191c; --card:#1e2226;
+            --ok:#4cc38a; --bad:#f07167; --warn:#e3b341; --accent:#7aa2ff; --manual:#b8932a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--fg); background:var(--bg); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:10px 16px; background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  .pill { display:inline-flex; gap:6px; align-items:center; padding:3px 10px; border-radius:999px; border:1px solid var(--line); font-size:13px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  main { padding:12px 16px; }
+  section.card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px; }
+  h2 { font-size:14px; margin:0 0 8px; }
+  h3 { font-size:13px; margin:10px 0 4px; }
+  .filters { display:flex; flex-wrap:wrap; gap:10px 16px; align-items:flex-end; }
+  .filters label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); gap:2px; }
+  label.inline { display:inline-flex; flex-direction:row; align-items:center; gap:6px; font-size:13px; color:var(--fg); }
+  input, textarea, select, button { font:inherit; color:inherit; }
+  input[type=number] { width:70px; } input[type=text] { min-width:200px; }
+  input, textarea, select { background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:3px 6px; }
+  textarea { width:100%; max-width:420px; height:52px; resize:vertical; font-size:13px; }
+  button { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:5px 11px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { background:var(--bad); color:#fff; border-color:var(--bad); }
+  button.small { padding:1px 8px; font-size:12px; }
+  button.link { border:none; background:none; color:var(--accent); padding:0 4px; font-size:12px; }
+  button:disabled { opacity:.5; cursor:default; }
+  .rules { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:2px 14px; margin:2px 0 6px; }
+  .rules label { font-size:13px; }
+  .rules label.off span { color:var(--muted); text-decoration:line-through; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .toolbar .sep { width:1px; height:22px; background:var(--line); margin:0 4px; }
+  .muted { color:var(--muted); } .hint { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { position:sticky; top:0; background:var(--card); font-weight:600; z-index:1; }
+  tr.manual td:first-child { box-shadow: inset 4px 0 0 var(--manual); }
+  tr.excluded td.title { color:var(--muted); }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  td.date { white-space:nowrap; }
+  button.plain { all:unset; cursor:pointer; color:inherit; font:inherit; text-align:left; }
+  button.plain:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:2px; } td.icon { text-align:center; }
+  .hs { font-weight:700; font-size:15px; cursor:help; } .hs.ok { color:var(--ok); } .hs.bad { color:var(--bad); }
+  .hs.warn { color:var(--warn); } .hs.info { color:var(--muted); } td.why { min-width:220px; }
+  .tag { display:inline-block; padding:0 6px; border-radius:4px; font-size:12px; border:1px solid currentColor; margin:1px 2px 1px 0; white-space:nowrap; }
+  .tag.ok { color:var(--ok); } .tag.bad { color:var(--bad); } .tag.warn { color:var(--warn); } .tag.info { color:var(--muted); }
+  ul.reasons { margin:0; padding-left:16px; } ul.reasons li.note { color:var(--muted); list-style:circle; }
+  .tablewrap { max-height:62vh; overflow:auto; }
+  details.card-section > summary { cursor:pointer; font-weight:600; margin-top:8px; }
+  details.payload { border:1px solid var(--line); border-radius:6px; padding:4px 8px; margin:4px 0; }
+  summary { cursor:pointer; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); padding:8px; border-radius:6px; font-size:12px; max-height:340px; overflow:auto; }
+  #msg { min-height:1.4em; }
+  .err { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Hermes → Hindsight backfill</h1>
+  <span class="pill" id="st-db"><span class="dot"></span><span>Hermes DB: checking…</span></span>
+  <span class="pill" id="st-hs"><span class="dot"></span><span>Hindsight: checking…</span></span>
+  <button id="btn-status" title="Re-check connections">↻</button>
+</header>
+<main>
+  <section class="card">
+    <h2>1. Which sessions</h2>
+    <div class="filters" style="margin-bottom:10px">
+      <label>Hermes profile <select id="f-profile"></select></label>
+      <label>Send to Hindsight bank <select id="f-bank"></select></label>
+      <span class="hint" id="bank-hint" style="align-self:center"></span>
+    </div>
+    <div class="filters">
+      <label>Started in the last (days) <input type="number" id="f-days" min="1"></label>
+      <label>…and on or before (optional) <input type="date" id="f-until"></label>
+      <label>Min. back-and-forth exchanges <input type="number" id="f-min-turns" min="0"></label>
+      <label>Min. tool calls (or a code block) <input type="number" id="f-min-tools" min="0"></label>
+      <label>Skip sessions that used these tools (comma-separated) <input type="text" id="f-tools"></label>
+      <label class="inline" title="Hermes only records a session_key when a session ends cleanly. Sessions cut short by a crash or restart don't have one."><input type="checkbox" id="f-missing-key"> Only sessions that ended cleanly</label>
+    </div>
+
+    <details class="card-section" id="rules-box">
+      <summary id="rules-summary">Title rules</summary>
+      <h3>Skip sessions whose title mentions… <button class="link" data-all="exclude">all</button><button class="link" data-none="exclude">none</button></h3>
+      <div class="rules" id="rules-exclude"></div>
+      <label class="muted" style="font-size:12px">Also skip titles mentioning (one word or phrase per line)<br><textarea id="f-exclude" placeholder="e.g. grocery list"></textarea></label>
+
+      <h3>…but always keep sessions whose title mentions <span class="hint">(beats the skip rules and skipped tools)</span> <button class="link" data-all="keep">all</button><button class="link" data-none="keep">none</button></h3>
+      <div class="rules" id="rules-keep"></div>
+      <label class="muted" style="font-size:12px">Also always keep titles mentioning (one word or phrase per line)<br><textarea id="f-keep" placeholder="e.g. homelab"></textarea></label>
+      <div><label class="inline hint" title="Off: entries match whole words, ignoring case. On: entries are Python regular expressions."><input type="checkbox" id="f-regex"> Advanced: my entries above are regular expressions</label></div>
+    </details>
+    <div style="margin-top:10px"><button class="primary" id="btn-load">Load sessions</button>
+      <span class="hint">Reads the Hermes database, asks Hindsight which sessions the bank already has, and applies the rules. Nothing is sent.</span></div>
+  </section>
+
+  <section class="card">
+    <h2>2. Review, then send</h2>
+    <div class="toolbar">
+      <button id="btn-all">Select all</button>
+      <button id="btn-none">Select none</button>
+      <button id="btn-reset" title="Undo manual ticks: go back to what the rules decided">Reset to rules</button>
+      <span class="sep"></span>
+      <label class="muted">Show <select id="view">
+        <option value="all">All</option><option value="selected">Selected</option>
+        <option value="included">Passed the rules</option><option value="excluded">Skipped by the rules</option>
+        <option value="dup">In Hindsight (✓)</option><option value="maybe">Maybe in Hindsight (?)</option><option value="absent">Not in Hindsight (✗)</option><option value="manual">Changed by hand</option>
+      </select></label>
+      <span class="sep"></span>
+      <button id="btn-dry" title="Show exactly what would be sent for the selected sessions. Nothing is sent.">Preview selected</button>
+      <button class="danger" id="btn-commit">Send selected to Hindsight</button>
+      <span class="muted" id="counts"></span>
+    </div>
+    <div id="msg" class="muted"></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th><input type="checkbox" id="chk-visible" title="Tick/untick all rows shown"></th>
+          <th>Started</th><th>Title</th><th class="num">Msgs</th><th class="num">Tools</th>
+          <th title="✓ ingested or exists in the chosen bank · ✗ not found">In Hindsight</th><th>Rules</th><th>Why</th><th>Result</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="9" class="muted">Load sessions to begin.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" id="dry-card" hidden>
+    <h2 id="dry-title">Preview — exactly what would be sent</h2>
+    <div class="muted" id="dry-summary"></div>
+    <div id="dry-items"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const S = { sessions: [], byId: new Map(), sel: new Map(), manual: new Set(), result: {}, hs: {}, busy: false, defaults: null,
+            profiles: [], banks: [], profile: "default", bank: "" };
+const ctx = () => ({ profile: S.profile, bank: S.bank });
+
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v; else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+}
+const tag = (text, kind, title) => el("span", { class: `tag ${kind}`, text, ...(title ? { title } : {}) });
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  let data; try { data = await r.json(); } catch { data = { error: `HTTP ${r.status}` }; }
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+function msg(text, isErr = false) { $("msg").textContent = text; $("msg").className = isErr ? "err" : "muted"; }
+function setBusy(b) {
+  S.busy = b;
+  for (const id of ["btn-load", "btn-dry", "btn-commit", "btn-all", "btn-none", "btn-reset", "f-profile", "f-bank"]) $(id).disabled = b;
+}
+
+// ---- status ---------------------------------------------------------------
+function pill(id, ok, text, title) {
+  const p = $(id); p.querySelector(".dot").className = "dot " + (ok ? "ok" : "bad");
+  p.querySelector("span:last-child").textContent = text; p.title = title || "";
+}
+async function loadStatus() {
+  pill("st-db", false, "Hermes DB: checking…"); pill("st-hs", false, "Hindsight: checking…");
+  try {
+    const s = await api("/api/status?" + new URLSearchParams(ctx()));
+    const d = s.db, h = s.hindsight;
+    pill("st-db", d.ok, d.ok ? `Hermes “${S.profile}”: ${d.sessions} sessions` : `Hermes DB: ${d.error}`, d.path);
+    pill("st-hs", h.ok, !h.ok ? `Hindsight: ${h.error}` : h.bank ? `Hindsight ${h.version}: bank “${h.bank}” (${h.documents} docs)` : `Hindsight ${h.version}: choose a bank`, h.url);
+  } catch (e) { pill("st-db", false, "status failed: " + e.message); }
+}
+
+// ---- profile & bank -------------------------------------------------------
+const curProfile = () => S.profiles.find(p => p.name === S.profile);
+async function loadProfiles() {
+  const r = await api("/api/profiles");
+  S.profiles = r.profiles; S.banks = r.banks;
+  if (r.banks_error) msg("Could not list Hindsight banks: " + r.banks_error, true);
+  $("f-profile").replaceChildren(...S.profiles.map(p => el("option", { value: p.name, text: p.bank ? `${p.name}  →  ${p.bank}` : `${p.name}  (no bank set)` })));
+  if (!S.profiles.length) throw new Error(`no Hermes profiles with a state.db under ${r.hermes_home}`);
+  if (!curProfile()) S.profile = S.profiles[0].name;
+  $("f-profile").value = S.profile;
+  pickDefaultBank();
+}
+function pickDefaultBank() {
+  const p = curProfile();
+  const opts = [el("option", { value: "", text: "— choose a bank —" }), ...S.banks.map(b => el("option", { value: b, text: b }))];
+  $("f-bank").replaceChildren(...opts);
+  S.bank = p.bank && S.banks.includes(p.bank) ? p.bank : "";
+  $("f-bank").value = S.bank;
+  bankHint();
+}
+function bankHint() {
+  const p = curProfile();
+  let h = p.warning ? `⚠ ${p.warning}`
+    : p.bank && !S.banks.includes(p.bank) ? `⚠ this profile's bank “${p.bank}” doesn't exist in Hindsight; choose one`
+    : S.bank && S.bank !== p.bank ? `⚠ this profile normally uses “${p.bank}”`
+    : p.bank ? `From ${p.bank_source}` : "";
+  $("bank-hint").textContent = h; $("bank-hint").title = p.db;
+}
+$("f-profile").onchange = () => { S.profile = $("f-profile").value; pickDefaultBank(); loadStatus(); loadSessions(); };
+$("f-bank").onchange = () => {
+  // "Already in Hindsight" depends on the bank, so reload with the new one.
+  S.bank = $("f-bank").value; bankHint(); loadStatus(); loadSessions();
+};
+const needBank = () => { if (S.bank) return false; msg("Choose a Hindsight bank first.", true); return true; };
+
+// ---- filters & title rules ------------------------------------------------
+const lines = (s) => s.split("\n").map(x => x.trim()).filter(Boolean);
+function ruleBoxes(kind) { return [...$(`rules-${kind}`).querySelectorAll("input[type=checkbox]")]; }
+function updateRulesSummary() {
+  const on = (k) => ruleBoxes(k).filter(c => c.checked).length;
+  const ex = ruleBoxes("exclude").length, kp = ruleBoxes("keep").length;
+  const custom = lines($("f-exclude").value).length + lines($("f-keep").value).length;
+  $("rules-summary").textContent = `Title rules — ${on("exclude")} of ${ex} skip words on, ${on("keep")} of ${kp} keep words on` + (custom ? `, ${custom} custom` : "");
+}
+function buildRules(kind, rules) {
+  const box = $(`rules-${kind}`); box.replaceChildren();
+  for (const r of rules) {
+    const cb = el("input", { type: "checkbox", value: r.id });
+    cb.checked = true;
+    const lab = el("label", { class: "inline", title: `Rule id: ${r.id}\nPattern: ${r.pattern}` }, cb, el("span", { text: r.label }));
+    cb.addEventListener("change", () => { lab.classList.toggle("off", !cb.checked); updateRulesSummary(); });
+    box.append(lab);
+  }
+}
+function filterBody() {
+  const off = [...ruleBoxes("exclude"), ...ruleBoxes("keep")].filter(c => !c.checked).map(c => c.value);
+  return {
+    days: +$("f-days").value, until: $("f-until").value || null,
+    min_turns: +$("f-min-turns").value, min_tool_calls: +$("f-min-tools").value,
+    exclude_tools: $("f-tools").value.split(",").map(x => x.trim()).filter(Boolean),
+    disabled_rules: off,
+    custom_exclude: lines($("f-exclude").value), custom_keep: lines($("f-keep").value),
+    custom_is_regex: $("f-regex").checked,
+    exclude_missing_session_key: $("f-missing-key").checked,
+  };
+}
+async function loadDefaults() {
+  const d = S.defaults = await api("/api/defaults");
+  $("f-days").value = d.days; $("f-min-turns").value = d.min_turns; $("f-min-tools").value = d.min_tool_calls;
+  $("f-tools").value = d.exclude_tools.join(", ");
+  buildRules("exclude", d.exclude_rules); buildRules("keep", d.keep_rules);
+  updateRulesSummary();
+}
+
+// ---- sessions -------------------------------------------------------------
+const defaultSel = (s) => s.included && !(S.result[s.id] && (S.result[s.id].ok || S.result[s.id].skipped));
+async function loadSessions() {
+  setBusy(true); msg(S.bank ? `Loading sessions and checking Hindsight bank “${S.bank}”…` : "Loading sessions…");
+  try {
+    const r = await api("/api/sessions", { ...filterBody(), ...ctx() });
+    S.sessions = r.sessions; S.byId = new Map(r.sessions.map(s => [s.id, s]));
+    S.sel = new Map(); S.manual = new Set(); S.result = {}; S.hs = r.hindsight;
+    for (const s of S.sessions) S.sel.set(s.id, defaultSel(s));
+    $("dry-card").hidden = true;
+    const hsText = S.hs.checked ? ` ${r.in_hindsight} already in bank “${S.hs.bank}” (checked ${S.hs.documents_scanned} documents at ${S.hs.checked_at}).`
+      : S.hs.error ? ` Hindsight not checked: ${S.hs.error}.` : " Choose a bank to check what Hindsight already has.";
+    msg(`${r.count} sessions in this date range; ${r.included} pass the rules and are selected.${hsText}`, !!S.hs.error);
+    render();
+  } catch (e) { msg("Load failed: " + e.message, true); }
+  finally { setBusy(false); render(); }
+}
+function setSel(id, on, manual = true) {
+  S.sel.set(id, on);
+  const s = S.byId.get(id);
+  if (manual && on !== defaultSel(s)) S.manual.add(id); else S.manual.delete(id);
+}
+function visible() {
+  const v = $("view").value;
+  return S.sessions.filter(s => v === "all" || (v === "selected" && S.sel.get(s.id)) ||
+    (v === "included" && s.included) || (v === "excluded" && !s.included) ||
+    (v === "dup" && s.in_hindsight === "exact") || (v === "maybe" && s.in_hindsight === "possible") ||
+    (v === "absent" && S.hs.checked && !s.in_hindsight) || (v === "manual" && S.manual.has(s.id)));
+}
+function render() {
+  const tb = $("rows"); tb.replaceChildren();
+  const vis = visible();
+  if (!vis.length) tb.append(el("tr", {}, el("td", { colspan: 9, class: "muted", text: S.sessions.length ? "No rows in this view." : "No sessions loaded." })));
+  for (const s of vis) {
+    const cb = el("input", { type: "checkbox", onchange: (ev) => { setSel(s.id, ev.target.checked); render(); } });
+    cb.checked = !!S.sel.get(s.id); cb.disabled = S.busy;
+    const why = el("ul", { class: "reasons" });
+    for (const r of s.reasons) why.append(el("li", { text: r.message }));
+    for (const n of s.notes) why.append(el("li", { class: "note", text: n }));
+    if (S.manual.has(s.id)) why.append(el("li", { class: "note", text: S.sel.get(s.id) ? "ticked by hand (overrides the rules)" : "unticked by hand" }));
+    const dupCell = hsIcon(s);
+    const res = S.result[s.id];
+    const resCell = !res ? null : res.pending ? tag("sending…", "info")
+      : res.ok ? tag("sent", "ok") : res.skipped ? tag("not sent: already there", "warn", res.error)
+      : el("span", { class: "err", text: "failed: " + res.error });
+    const tools = el("td", { class: "num", title: s.tools.join(", "), text: String(s.tool_call_count) });
+    // The title opens the preview. It's a button for keyboard access, styled
+    // as plain text: no link colour, underline or visited state.
+    const titleBtn = el("button", { class: "plain", title: `Click to see exactly what would be sent\nSession ${s.id}`,
+                                    onclick: () => preview([s.id]) }, s.title);
+    tb.append(el("tr", { class: (s.included ? "" : "excluded ") + (S.manual.has(s.id) ? "manual" : "") },
+      el("td", {}, cb), el("td", { class: "date", text: s.started }), el("td", { class: "title" }, titleBtn),
+      el("td", { class: "num", text: String(s.message_count) }), tools, el("td", { class: "icon" }, dupCell),
+      el("td", {}, s.included ? tag("pass", "ok") : tag("skipped", "bad")),
+      el("td", { class: "why" }, why), el("td", {}, resCell)));
+  }
+  const n = [...S.sel.values()].filter(Boolean).length;
+  $("counts").textContent = S.sessions.length ? `${n} selected · ${S.manual.size} changed by hand` : "";
+  $("chk-visible").checked = vis.length > 0 && vis.every(s => S.sel.get(s.id));
+}
+function hsIcon(s) {
+  const icon = (text, cls, title) => el("span", { class: `hs ${cls}`, text, title, "aria-label": title });
+  if (s.in_hindsight === "exact") return icon("✓", "ok", "Ingested or exists in Hindsight");
+  if (s.in_hindsight === "possible") return icon("?", "warn", "Possibly in Hindsight: not found by id, but an old backfill (made before sessions were tagged with their full id) exists for a session started the same day. Skipped by the rules; tick by hand to send anyway.");
+  if (S.hs.checked) return icon("✗", "bad", "Not found in Hindsight");
+  return icon("–", "info", S.hs.error || "Not checked: choose a bank");
+}
+const selectedIds = () => S.sessions.filter(s => S.sel.get(s.id)).map(s => s.id);
+
+// ---- preview / send -------------------------------------------------------
+async function preview(ids) {
+  if (!ids.length) return msg("Nothing selected.", true);
+  if (needBank()) return;
+  setBusy(true); msg("Building preview (nothing is sent)…");
+  try {
+    const r = await api("/api/preview", { ids, ...ctx() });
+    const box = $("dry-items"); box.replaceChildren();
+    let chars = 0, ok = 0;
+    for (const it of r.items) {
+      const s = S.byId.get(it.id);
+      if (!it.ok) { box.append(el("div", { class: "err", text: `${s ? s.title : it.id}: ${it.error}` })); continue; }
+      ok++; const p = it.payload; chars += p.content.length;
+      const { content, ...meta } = p;
+      const d = el("details", { class: "payload" },
+        el("summary", { text: `${s ? s.title : it.id} — ${content.length.toLocaleString()} characters` }),
+        el("div", { class: "muted", text: "Sent alongside the text:" }), el("pre", { text: JSON.stringify(meta, null, 2) }),
+        el("div", { class: "muted", text: "Text:" }), el("pre", { text: content }));
+      if (ids.length === 1) d.open = true;
+      box.append(d);
+    }
+    $("dry-title").textContent = ids.length === 1 ? "Preview — exactly what would be sent for this session" : "Preview — exactly what would be sent";
+    $("dry-summary").textContent = `${ok} session(s) would be sent to ${r.url}, ${chars.toLocaleString()} characters in total. Nothing has been sent.`;
+    $("dry-card").hidden = false; $("dry-card").scrollIntoView({ behavior: "smooth" });
+    msg(`Preview ready for ${ok} session(s).`);
+  } catch (e) { msg("Preview failed: " + e.message, true); }
+  finally { setBusy(false); render(); }
+}
+async function commit() {
+  const ids = selectedIds();
+  if (!ids.length) return msg("Nothing selected.", true);
+  if (needBank()) return;
+  const warn = !S.hs.checked ? "\n\n(Hindsight wasn't checked; it will still refuse any session it already has.)" : "";
+  if (!confirm(`Send ${ids.length} session(s) from Hermes profile “${S.profile}” to Hindsight bank “${S.bank}” at ${S.defaults.url}?${warn}`)) return;
+  setBusy(true);
+  let ok = 0, skipped = 0, fail = 0;
+  for (const [i, id] of ids.entries()) {
+    S.result[id] = { pending: true }; render();
+    msg(`Sending ${i + 1} of ${ids.length}…`);
+    try {
+      const r = await api("/api/commit", { id, ...ctx() });
+      S.result[id] = r;
+      if (r.ok || r.skipped) {
+        // It's in Hindsight now: show it the way a fresh load would.
+        const s = S.byId.get(id); s.in_hindsight = "exact"; s.included = false;
+        if (!s.reasons.some(x => x.code === "in_hindsight")) s.reasons.unshift({ code: "in_hindsight", message: `already in Hindsight bank '${S.bank}'` });
+        S.sel.set(id, false); S.manual.delete(id);
+      }
+      if (r.ok) ok++; else if (r.skipped) skipped++; else fail++;
+    } catch (e) { S.result[id] = { ok: false, error: e.message }; fail++; }
+  }
+  setBusy(false); render();
+  msg(`Done: ${ok} sent, ${skipped} not sent (already in Hindsight), ${fail} failed.`, fail > 0);
+  loadStatus();
+}
+
+// ---- wiring ---------------------------------------------------------------
+$("btn-status").onclick = loadStatus;
+$("btn-load").onclick = loadSessions;
+$("btn-all").onclick = () => { for (const s of S.sessions) setSel(s.id, true); render(); };
+$("btn-none").onclick = () => { for (const s of S.sessions) setSel(s.id, false); render(); };
+$("btn-reset").onclick = () => { S.manual.clear(); for (const s of S.sessions) S.sel.set(s.id, defaultSel(s)); render(); };
+$("chk-visible").onchange = (ev) => { for (const s of visible()) setSel(s.id, ev.target.checked); render(); };
+$("view").onchange = render;
+$("btn-dry").onclick = () => preview(selectedIds());
+$("btn-commit").onclick = commit;
+$("f-exclude").oninput = $("f-keep").oninput = updateRulesSummary;
+for (const b of document.querySelectorAll("[data-all],[data-none]")) {
+  b.onclick = () => { const kind = b.dataset.all || b.dataset.none;
+    for (const c of ruleBoxes(kind)) { c.checked = !!b.dataset.all; c.dispatchEvent(new Event("change")); } };
+}
+loadProfiles().then(() => { loadStatus(); return loadDefaults(); }).then(loadSessions)
+  .catch(e => msg("Failed to start: " + e.message, true));
+</script>
+</body>
+</html>
